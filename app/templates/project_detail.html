@@ -78,7 +78,9 @@
       </div>
       {% if summary.projection is not none %}
         <div class="relative h-3 mt-0.5">
-          <div class="absolute top-0 -translate-x-1/2 text-[10px] text-slate-500 dark:text-slate-400 whitespace-nowrap" style="left: {{ tick_pct }}%">↑ projected {{ '%.0f' % projection_pct }}%</div>
+          {# Shift label by the same percentage as its position so the right
+             edge stays inside the bar even when projection is at 100%+. #}
+          <div class="absolute top-0 text-[10px] text-slate-500 dark:text-slate-400 whitespace-nowrap" style="left: {{ tick_pct }}%; transform: translateX(-{{ tick_pct }}%)">↑ projected {{ '%.0f' % projection_pct }}%</div>
         </div>
       {% endif %}
     </div>

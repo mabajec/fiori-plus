@@ -53,8 +53,11 @@
         </div>
         {% if s.projection %}
           <div class="relative h-3 mt-0.5">
-            <div class="absolute top-0 -translate-x-1/2 text-[10px] text-slate-500 dark:text-slate-400 whitespace-nowrap"
-                 style="left: {{ s.tick_pct }}%">↑ projected {{ s.projection_pct_fmt }}%</div>
+            {# Smooth shift: at 0% the label's left edge sits at the tick,
+               at 100% the right edge sits at the tick, proportional in
+               between. Keeps the label always fully inside the bar. #}
+            <div class="absolute top-0 text-[10px] text-slate-500 dark:text-slate-400 whitespace-nowrap"
+                 style="left: {{ s.tick_pct }}%; transform: translateX(-{{ s.tick_pct }}%)">↑ projected {{ s.projection_pct_fmt }}%</div>
           </div>
         {% endif %}
       </div>
