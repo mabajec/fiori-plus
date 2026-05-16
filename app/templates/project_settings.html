@@ -188,17 +188,27 @@
     <p class="text-sm text-slate-500 dark:text-slate-400 mb-3">Not shared with anyone yet.</p>
   {% endif %}
   {% if is_owner %}
-    <form method="post" action="/projects/{{ project.id }}/share" class="flex gap-2">
-      <input type="email" name="email" required placeholder="user@example.com"
-             class="flex-1 px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
-      <button type="submit"
-              class="px-4 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-sm font-medium rounded-lg transition-colors whitespace-nowrap">
-        Share with user
-      </button>
-    </form>
-    <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">
-      The other user must already exist in the system. Use <code class="bg-slate-100 dark:bg-slate-900 px-1 rounded">fiori user create</code> to add them.
-    </p>
+    {% if shareable_users %}
+      <form method="post" action="/projects/{{ project.id }}/share" class="flex gap-2">
+        <select name="email" required
+                class="flex-1 px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <option value="" disabled selected>Pick a user…</option>
+          {% for u in shareable_users %}
+            <option value="{{ u.email }}">
+              {% if u.name %}{{ u.name }} — {{ u.email }}{% else %}{{ u.email }}{% endif %}
+            </option>
+          {% endfor %}
+        </select>
+        <button type="submit"
+                class="px-4 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-sm font-medium rounded-lg transition-colors whitespace-nowrap">
+          Share with user
+        </button>
+      </form>
+    {% else %}
+      <p class="text-xs text-slate-500 dark:text-slate-400">
+        No other users to share with — everyone in the system either owns this project or is already on it.
+      </p>
+    {% endif %}
   {% else %}
     <p class="text-xs text-slate-500 dark:text-slate-400">
       Only the project owner can manage sharing.

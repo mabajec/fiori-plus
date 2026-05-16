@@ -921,6 +921,16 @@ def project_settings(request: Request, project_id: int, saved: int = 0, error: s
             }
             for share, u in share_rows
         ]
+        # Users we could still share with: anyone who isn't the owner and
+        # isn't already shared with this project.
+        excluded_ids = {project.owner_user_id} | {s["user_id"] for s in shares}
+        shareable = list(
+            session.scalars(
+                select(User)
+                .where(User.id.not_in(excluded_ids))
+                .order_by(User.name, User.email)
+            )
+        )
         return templates.TemplateResponse(
             request,
             "project_settings.html",
@@ -936,6 +946,7 @@ def project_settings(request: Request, project_id: int, saved: int = 0, error: s
                 "owner_email": owner.email if owner else None,
                 "owner_name": owner.name if owner else None,
                 "shares": shares,
+                "shareable_users": shareable,
                 "saved": bool(saved),
                 "error": error or None,
             },
