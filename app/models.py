@@ -88,6 +88,8 @@ class Transaction(Base):
             "account_code",
             "amount",
             "posting_date",
+            "employee",
+            "text",
             name="uq_transactions_natural_key",
         ),
     )

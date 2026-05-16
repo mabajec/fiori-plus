@@ -15,8 +15,31 @@ from app.models import ImportRun, Project, Transaction
 
 
 HEADER_FIRST_CELL = "PPS element"
-EXPECTED_COLUMNS = 10
 DEFAULT_ENCODING = "mac_latin2"
+
+# Source-system column header → field name we use internally.
+COLUMN_MAP: dict[str, str] = {
+    "PPS element": "pps_element",
+    "Štev. dok.": "document_number",
+    "Kto GK": "account_code",
+    "Dolgi tekst konta GK": "account_text",
+    "Znes.v DV": "amount",
+    "KadrŠt": "employee",
+    "Tekst": "text",
+    "Dat.knj.": "posting_date",
+    "Vir fin.": "source",
+    "Leto": "year",
+}
+
+REQUIRED_FIELDS = {
+    "pps_element",
+    "document_number",
+    "account_code",
+    "amount",
+    "posting_date",
+}
+
+ALL_FIELDS = set(COLUMN_MAP.values())
 
 
 @dataclass
@@ -27,7 +50,7 @@ class ImportResult:
     rows_imported: int
     rows_skipped: int
     file_sha256: str
-    duplicate_file: bool  # True if this exact file was already imported
+    duplicate_file: bool
 
 
 def sha256_file(path: Path) -> str:
@@ -36,22 +59,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-def read_rows(path: Path, encoding: str = DEFAULT_ENCODING) -> Iterator[list[str]]:
-    with open(path, encoding=encoding) as f:
-        text = f.read()
-    for raw in text.splitlines():
-        if not raw.strip():
-            continue
-        cells = raw.split("\t")
-        while cells and cells[0] == "":
-            cells.pop(0)
-        if not cells:
-            continue
-        if cells[0].strip() == HEADER_FIRST_CELL:
-            continue
-        yield cells
 
 
 def parse_amount(s: str) -> Decimal:
@@ -69,28 +76,77 @@ def parse_date(s: str) -> date:
     raise ValueError(f"Unparseable date: {s!r}")
 
 
-def parse_int_or_none(s: str) -> int | None:
-    s = s.strip()
-    return int(s) if s else None
-
-
-def parse_row(cells: list[str]) -> dict:
-    if len(cells) < EXPECTED_COLUMNS:
+def _build_field_map(header_cells: list[str]) -> dict[int, str]:
+    """Map column position → field name based on the header row."""
+    field_map: dict[int, str] = {}
+    for idx, cell in enumerate(header_cells):
+        name = cell.strip()
+        if name in COLUMN_MAP:
+            field_map[idx] = COLUMN_MAP[name]
+    missing = REQUIRED_FIELDS - set(field_map.values())
+    if missing:
         raise ValueError(
-            f"Expected {EXPECTED_COLUMNS} columns, got {len(cells)}: {cells!r}"
+            f"Header row missing required columns: {sorted(missing)}"
         )
-    return {
-        "pps_element": cells[0].strip(),
-        "document_number": cells[1].strip(),
-        "account_code": cells[2].strip(),
-        "account_text": cells[3].strip() or None,
-        "amount": parse_amount(cells[4]),
-        "employee": cells[5].strip() or None,
-        "text": cells[6].strip() or None,
-        "posting_date": parse_date(cells[7]),
-        "source": cells[8].strip() or None,
-        "year": parse_int_or_none(cells[9]),
-    }
+    return field_map
+
+
+def read_records(
+    path: Path, encoding: str = DEFAULT_ENCODING
+) -> Iterator[dict]:
+    """Yield one dict per data row, with string values mapped by column name.
+
+    Handles the two known source-system layouts (10-column full and 7-column
+    compact) and any future column reorderings, because field positions are
+    resolved from the actual header row in each file. Skips preamble lines
+    before the header and stops at a `*` totals footer.
+    """
+    with open(path, encoding=encoding) as f:
+        text = f.read()
+
+    field_map: dict[int, str] | None = None
+
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        cells = raw.split("\t")
+        while cells and cells[0] == "":
+            cells.pop(0)
+        if not cells:
+            continue
+        first = cells[0].strip()
+
+        if field_map is None:
+            if first == HEADER_FIRST_CELL:
+                field_map = _build_field_map(cells)
+            continue
+
+        if first == "*":
+            break
+
+        rec: dict = {f: None for f in ALL_FIELDS}
+        for idx, name in field_map.items():
+            if idx < len(cells):
+                rec[name] = cells[idx].strip() or None
+        yield rec
+
+    if field_map is None:
+        raise ValueError(
+            f"No column header row (starting with {HEADER_FIRST_CELL!r}) found "
+            f"in {path}."
+        )
+
+
+def parse_record(rec: dict) -> dict:
+    out = dict(rec)
+    out["amount"] = parse_amount(rec["amount"])
+    out["posting_date"] = parse_date(rec["posting_date"])
+    if rec.get("year") is not None:
+        try:
+            out["year"] = int(rec["year"])
+        except (TypeError, ValueError):
+            out["year"] = None
+    return out
 
 
 def ensure_project(
@@ -144,45 +200,34 @@ def import_file(
             duplicate_file=True,
         )
 
-    rows_iter = read_rows(path, encoding=encoding)
-    try:
-        first = next(rows_iter)
-    except StopIteration:
+    records = [parse_record(r) for r in read_records(path, encoding=encoding)]
+    if not records:
         raise ValueError("File contains no data rows.")
 
-    first_parsed = parse_row(first)
-    pps_element = first_parsed["pps_element"]
-    project = ensure_project(session, user_id, pps_element, name_resolver)
-
-    def to_record(parsed: dict) -> dict:
-        rec = {k: v for k, v in parsed.items() if k != "pps_element"}
-        rec["project_id"] = project.id
-        return rec
-
-    parsed_rows = [first_parsed]
-    for cells in rows_iter:
-        p = parse_row(cells)
-        if p["pps_element"] != pps_element:
+    pps_element = records[0]["pps_element"]
+    for r in records:
+        if r["pps_element"] != pps_element:
             raise ValueError(
                 f"File contains multiple PPS elements: {pps_element!r} and "
-                f"{p['pps_element']!r}. One file must cover one project."
+                f"{r['pps_element']!r}. One file must cover one project."
             )
-        parsed_rows.append(p)
+
+    project = ensure_project(session, user_id, pps_element, name_resolver)
 
     rows_imported = 0
-    for parsed in parsed_rows:
+    for rec in records:
+        values = {k: v for k, v in rec.items() if k != "pps_element"}
+        values["project_id"] = project.id
         stmt = (
             pg_insert(Transaction)
-            .values(**to_record(parsed))
-            .on_conflict_do_nothing(
-                constraint="uq_transactions_natural_key"
-            )
+            .values(**values)
+            .on_conflict_do_nothing(constraint="uq_transactions_natural_key")
             .returning(Transaction.id)
         )
         result = session.execute(stmt).first()
         if result is not None:
             rows_imported += 1
-    rows_skipped = len(parsed_rows) - rows_imported
+    rows_skipped = len(records) - rows_imported
 
     run = ImportRun(
         user_id=user_id,
