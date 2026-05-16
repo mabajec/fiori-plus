@@ -8,10 +8,11 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
@@ -35,6 +36,7 @@ class Project(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     pps_element: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
     owner_user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id"), nullable=False
     )
@@ -42,10 +44,56 @@ class Project(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    annual_data: Mapped[list["ProjectAnnualData"]] = relationship(
+        back_populates="project",
+        order_by="ProjectAnnualData.year",
+        cascade="all, delete-orphan",
+    )
+
     __table_args__ = (
         UniqueConstraint(
             "owner_user_id", "pps_element", name="uq_projects_owner_pps"
         ),
+    )
+
+
+class ProjectAnnualData(Base):
+    __tablename__ = "project_annual_data"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    year: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_budget: Mapped[Decimal | None] = mapped_column(Numeric(15, 2))
+    starting_balance: Mapped[Decimal | None] = mapped_column(Numeric(15, 2))
+
+    project: Mapped[Project] = relationship(back_populates="annual_data")
+    budget_lines: Mapped[list["ProjectBudgetLine"]] = relationship(
+        back_populates="annual_data",
+        order_by="ProjectBudgetLine.position",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "year", name="uq_project_annual_data"),
+    )
+
+
+class ProjectBudgetLine(Base):
+    __tablename__ = "project_budget_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_annual_data_id: Mapped[int] = mapped_column(
+        ForeignKey("project_annual_data.id", ondelete="CASCADE"), nullable=False
+    )
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    account_prefix: Mapped[str | None] = mapped_column(String(32))
+    amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    annual_data: Mapped[ProjectAnnualData] = relationship(
+        back_populates="budget_lines"
     )
 
 

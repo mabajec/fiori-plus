@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — Settings{% endblock %}
+{% block content %}
+<div class="mb-2">
+  <a href="/projects" class="text-sm text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400">← All projects</a>
+</div>
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold mb-1">{{ project.name }}</h1>
+  <p class="text-xs text-slate-400 dark:text-slate-500 font-mono">{{ project.pps_element }}</p>
+</div>
+
+{% if saved %}
+  <div class="mb-4 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800 text-sm text-emerald-700 dark:text-emerald-300">
+    Saved.
+  </div>
+{% endif %}
+{% if error %}
+  <div class="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+    {{ error }}
+  </div>
+{% endif %}
+
+<form method="post" action="/projects/{{ project.id }}/settings" class="space-y-6">
+  {# ───── Project basics ───── #}
+  <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 space-y-4">
+    <h2 class="text-base font-semibold">Project basics</h2>
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Name</label>
+      <input type="text" name="name" required value="{{ project.name }}"
+             class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Description</label>
+      <textarea name="description"
+                rows="3"
+                placeholder="What this project is about, who funds it, key dates…"
+                class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">{{ project.description or '' }}</textarea>
+    </div>
+  </section>
+
+  {# ───── Per-year sections ───── #}
+  {% for ad in project.annual_data %}
+    <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-base font-semibold">Year {{ ad.year }}</h2>
+        <button type="submit" name="delete_year" value="{{ ad.year }}"
+                onclick="event.preventDefault(); askConfirm(this, 'Remove year {{ ad.year }}?', 'All budget metadata for this year will be deleted. Transactions are not affected.');"
+                class="text-xs text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400">
+          Remove year
+        </button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Total budget (€)</label>
+          <input type="text" inputmode="decimal"
+                 name="year_{{ ad.year }}_total"
+                 value="{{ ad.total_budget_formatted }}"
+                 data-prev="{{ ad.total_budget_formatted }}"
+                 data-year="{{ ad.year }}"
+                 placeholder="e.g. 100.000,00"
+                 onchange="rescaleLines(this)"
+                 class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Starting balance (€)</label>
+          <input type="text" inputmode="decimal"
+                 name="year_{{ ad.year }}_starting"
+                 value="{{ ad.starting_balance_formatted }}"
+                 placeholder="optional"
+                 class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums">
+        </div>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-medium text-slate-600 dark:text-slate-300">Budget structure</h3>
+          <span class="text-xs text-slate-400 dark:text-slate-500">Enter <code>20%</code> in Amount to set 20% of total</span>
+        </div>
+        <table class="w-full text-sm" id="year-{{ ad.year }}-lines-table">
+          <thead class="border-b border-slate-200 dark:border-slate-700">
+            <tr class="text-left text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              <th class="py-2 font-medium w-2/5">Label</th>
+              <th class="py-2 font-medium pl-3 w-1/5">Account prefix</th>
+              <th class="py-2 font-medium pl-3 w-1/4 text-right">Amount (€)</th>
+              <th class="py-2 font-medium pl-3"></th>
+            </tr>
+          </thead>
+          <tbody id="year-{{ ad.year }}-lines">
+            {% for line in ad.budget_lines %}
+              <tr>
+                <td class="pr-2 py-1">
+                  <input type="text" name="year_{{ ad.year }}_line_{{ loop.index0 }}_label" value="{{ line.label }}"
+                         class="w-full px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                </td>
+                <td class="px-2 py-1">
+                  <input type="text" name="year_{{ ad.year }}_line_{{ loop.index0 }}_prefix" value="{{ line.account_prefix or '' }}"
+                         placeholder="e.g. 461"
+                         class="w-full px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums">
+                </td>
+                <td class="px-2 py-1">
+                  <input type="text" inputmode="decimal" name="year_{{ ad.year }}_line_{{ loop.index0 }}_amount" value="{{ line.amount_formatted }}"
+                         class="w-full px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums text-right">
+                </td>
+                <td class="pl-2 py-1 text-right">
+                  <button type="button" onclick="this.closest('tr').remove(); updateSumStrip({{ ad.year }});"
+                          class="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-red-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="mt-2 flex items-center justify-between">
+          <button type="button" onclick="addLine({{ ad.year }})"
+                  class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">
+            + Add line
+          </button>
+          <div class="text-xs text-slate-500 dark:text-slate-400">
+            Lines sum:
+            <span class="font-medium tabular-nums" data-year-sum="{{ ad.year }}">{{ ad.lines_sum_formatted }}</span>
+            {% if ad.total_budget %}
+              <span class="text-slate-400 dark:text-slate-500"> / {{ ad.total_budget_formatted }}</span>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </section>
+  {% endfor %}
+
+  {# ───── Add another year ───── #}
+  <section class="bg-white dark:bg-slate-800 border border-dashed border-slate-300 dark:border-slate-600 rounded-xl p-4 flex items-center gap-3">
+    <label class="text-sm text-slate-600 dark:text-slate-300">Add another year:</label>
+    <input type="number" name="add_year" placeholder="e.g. 2027" min="2000" max="2099"
+           class="w-32 px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums">
+    <button type="submit" name="action" value="add_year"
+            class="px-3 py-1 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-sm font-medium rounded-lg transition-colors">
+      Add
+    </button>
+  </section>
+
+  {# ───── Footer ───── #}
+  <div class="flex items-center justify-end gap-2">
+    <a href="/projects" class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+      Cancel
+    </a>
+    <button type="submit" name="action" value="save"
+            class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors">
+      Save all
+    </button>
+  </div>
+</form>
+
+{# ───── Confirm dialog (styled replacement for window.confirm) ───── #}
+<dialog id="confirm-dialog"
+        class="rounded-xl backdrop:bg-slate-900/60 dark:backdrop:bg-black/70 p-0 max-w-md w-full bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-2xl">
+  <div class="px-6 py-5">
+    <h2 id="confirm-title" class="text-base font-semibold mb-2"></h2>
+    <p id="confirm-body" class="text-sm text-slate-600 dark:text-slate-300"></p>
+  </div>
+  <footer class="px-6 py-4 border-t border-slate-200 dark:border-slate-700 flex items-center justify-end gap-2 bg-slate-50 dark:bg-slate-900/40">
+    <button type="button" id="confirm-cancel"
+            class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors">
+      Cancel
+    </button>
+    <button type="button" id="confirm-ok"
+            class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors">
+      Yes, remove
+    </button>
+  </footer>
+</dialog>
+
+<script>
+  // Parse a Slovenian-formatted number string ("1.234,56" → 1234.56). Empty → null.
+  function parseSlo(s) {
+    if (!s) return null;
+    const cleaned = s.replace(/\./g, '').replace(',', '.').trim();
+    const n = parseFloat(cleaned);
+    return isNaN(n) ? null : n;
+  }
+  function formatSlo(n) {
+    if (n === null || isNaN(n)) return '';
+    // toLocaleString with sl-SI does the right thing.
+    return n.toLocaleString('sl-SI', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function updateSumStrip(year) {
+    const inputs = document.querySelectorAll(`input[name^="year_${year}_line_"][name$="_amount"]`);
+    let sum = 0;
+    inputs.forEach(el => { sum += parseSlo(el.value) || 0; });
+    const target = document.querySelector(`[data-year-sum="${year}"]`);
+    if (target) target.textContent = formatSlo(sum);
+  }
+
+  function rescaleLines(totalInput) {
+    const year = totalInput.dataset.year;
+    const oldTotal = parseSlo(totalInput.dataset.prev);
+    const newTotal = parseSlo(totalInput.value);
+    totalInput.dataset.prev = totalInput.value;
+    if (oldTotal && oldTotal > 0 && newTotal !== null) {
+      const ratio = newTotal / oldTotal;
+      document.querySelectorAll(`input[name^="year_${year}_line_"][name$="_amount"]`).forEach(el => {
+        const old = parseSlo(el.value);
+        if (old !== null) el.value = formatSlo(old * ratio);
+      });
+    }
+    updateSumStrip(year);
+  }
+
+  function addLine(year) {
+    const tbody = document.getElementById(`year-${year}-lines`);
+    const idx = tbody.querySelectorAll('tr').length;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="pr-2 py-1">
+        <input type="text" name="year_${year}_line_${idx}_label" value=""
+               class="w-full px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      </td>
+      <td class="px-2 py-1">
+        <input type="text" name="year_${year}_line_${idx}_prefix" value="" placeholder="e.g. 461"
+               class="w-full px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums">
+      </td>
+      <td class="px-2 py-1">
+        <input type="text" inputmode="decimal" name="year_${year}_line_${idx}_amount" value="" oninput="updateSumStrip(${year})"
+               class="w-full px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 tabular-nums text-right">
+      </td>
+      <td class="pl-2 py-1 text-right">
+        <button type="button" onclick="this.closest('tr').remove(); updateSumStrip(${year});"
+                class="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-red-600">
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+
+  // Wire amount inputs to update the sum strip live.
+  document.querySelectorAll('input[name*="_line_"][name$="_amount"]').forEach(el => {
+    const m = el.name.match(/year_(\d+)_line/);
+    if (m) el.addEventListener('input', () => updateSumStrip(m[1]));
+  });
+
+  // Styled confirm dialog. Used in place of window.confirm() so the
+  // experience stays consistent with the rest of the app.
+  let pendingConfirm = null;
+  function askConfirm(submitButton, title, body) {
+    pendingConfirm = () => {
+      // Re-create the button's name=value as a hidden input on the form
+      // (since we bypassed the submit click) and submit programmatically.
+      const form = submitButton.closest('form');
+      const hidden = document.createElement('input');
+      hidden.type = 'hidden';
+      hidden.name = submitButton.name;
+      hidden.value = submitButton.value;
+      form.appendChild(hidden);
+      form.submit();
+    };
+    document.getElementById('confirm-title').textContent = title;
+    document.getElementById('confirm-body').textContent = body;
+    document.getElementById('confirm-dialog').showModal();
+  }
+  document.getElementById('confirm-cancel').addEventListener('click', () => {
+    pendingConfirm = null;
+    document.getElementById('confirm-dialog').close();
+  });
+  document.getElementById('confirm-ok').addEventListener('click', () => {
+    document.getElementById('confirm-dialog').close();
+    if (pendingConfirm) pendingConfirm();
+  });
+</script>
+{% endblock %}

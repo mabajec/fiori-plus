@@ -569,3 +569,306 @@ def update_transaction(
             "_transaction_row.html",
             {"tr": updated_view, "proj": proj, "oob": True},
         )
+
+
+# ---------------------------------------------------------------------------
+# Projects list + per-project settings
+# ---------------------------------------------------------------------------
+
+
+@app.get("/projects", response_class=HTMLResponse)
+def projects_list(request: Request) -> HTMLResponse:
+    with SessionLocal() as session:
+        user = _current_user(session)
+        projects = list(
+            session.scalars(
+                select(Project)
+                .where(Project.owner_user_id == user.id)
+                .order_by(Project.name)
+            )
+        )
+    return templates.TemplateResponse(
+        request, "projects.html", {"projects": projects}
+    )
+
+
+def _format_slo_amount_or_blank(value: Decimal | None) -> str:
+    return _format_slo_money(value) if value is not None else ""
+
+
+def _parse_slo_amount(s: str | None, total_budget: Decimal | None = None) -> Decimal | None:
+    """Parse a user-typed amount.
+    Returns None for empty input. Raises ValueError for invalid input.
+    Supports `1.234,56`, `1234,56`, plain `1234.56`, and `20%` (of total_budget).
+    """
+    if s is None:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    if s.endswith("%"):
+        if total_budget is None:
+            raise ValueError(
+                f"Cannot use percent {s!r} without a total budget set."
+            )
+        pct = parse_amount(s[:-1])  # Decimal
+        return (total_budget * pct / Decimal(100)).quantize(Decimal("0.01"))
+    return parse_amount(s)
+
+
+@dataclass
+class BudgetLineView:
+    label: str
+    account_prefix: str | None
+    amount: Decimal
+    amount_formatted: str
+
+
+@dataclass
+class AnnualDataView:
+    year: int
+    total_budget: Decimal | None
+    total_budget_formatted: str
+    starting_balance: Decimal | None
+    starting_balance_formatted: str
+    budget_lines: list[BudgetLineView]
+    lines_sum_formatted: str
+
+
+def _annual_view(ad) -> AnnualDataView:
+    lines = [
+        BudgetLineView(
+            label=line.label,
+            account_prefix=line.account_prefix,
+            amount=line.amount,
+            amount_formatted=_format_slo_money(line.amount),
+        )
+        for line in ad.budget_lines
+    ]
+    lines_sum = sum((l.amount for l in lines), start=Decimal("0"))
+    return AnnualDataView(
+        year=ad.year,
+        total_budget=ad.total_budget,
+        total_budget_formatted=_format_slo_amount_or_blank(ad.total_budget),
+        starting_balance=ad.starting_balance,
+        starting_balance_formatted=_format_slo_amount_or_blank(ad.starting_balance),
+        budget_lines=lines,
+        lines_sum_formatted=_format_slo_money(lines_sum),
+    )
+
+
+def _load_project_for_settings(session: Session, user_id: int, project_id: int):
+    """Load a project owned by user_id, ensure an annual_data row exists for
+    each year present in its transactions, and return (project, annual_views).
+    """
+    from app.models import ProjectAnnualData  # local import to avoid cycle
+
+    project = session.scalar(
+        select(Project).where(
+            Project.id == project_id, Project.owner_user_id == user_id
+        )
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    existing_years = {ad.year for ad in project.annual_data}
+    txn_years = set(
+        session.scalars(
+            select(func.distinct(func.extract("year", Transaction.posting_date)))
+            .where(Transaction.project_id == project.id)
+        )
+    )
+    txn_years = {int(y) for y in txn_years if y is not None}
+    for year in sorted(txn_years - existing_years):
+        session.add(ProjectAnnualData(project_id=project.id, year=year))
+    if txn_years - existing_years:
+        session.commit()
+        session.refresh(project)
+
+    annual_views = [_annual_view(ad) for ad in sorted(project.annual_data, key=lambda a: a.year, reverse=True)]
+    return project, annual_views
+
+
+@app.get("/projects/{project_id}/settings", response_class=HTMLResponse)
+def project_settings(request: Request, project_id: int, saved: int = 0, error: str = "") -> HTMLResponse:
+    with SessionLocal() as session:
+        user = _current_user(session)
+        project, annual_views = _load_project_for_settings(session, user.id, project_id)
+        # We need the annual_views attached for the template loop. Re-render
+        # project's annual_data as views, since template iterates project.annual_data.
+        # Simplest path: just pass annual_views as the iterable.
+        return templates.TemplateResponse(
+            request,
+            "project_settings.html",
+            {
+                "project": _ProjectSettingsView(
+                    id=project.id,
+                    name=project.name,
+                    pps_element=project.pps_element,
+                    description=project.description,
+                    annual_data=annual_views,
+                ),
+                "saved": bool(saved),
+                "error": error or None,
+            },
+        )
+
+
+@dataclass
+class _ProjectSettingsView:
+    id: int
+    name: str
+    pps_element: str
+    description: str | None
+    annual_data: list[AnnualDataView]
+
+
+@app.post("/projects/{project_id}/settings", response_class=HTMLResponse)
+async def save_project_settings(request: Request, project_id: int) -> HTMLResponse:
+    form = await request.form()
+    action = form.get("action", "save")
+    delete_year = form.get("delete_year")
+
+    from app.models import ProjectAnnualData, ProjectBudgetLine
+    import re
+
+    with SessionLocal() as session:
+        user = _current_user(session)
+        project = session.scalar(
+            select(Project).where(
+                Project.id == project_id, Project.owner_user_id == user.id
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # ── action: delete a year ──────────────────────────────────────────
+        if delete_year:
+            try:
+                yr = int(delete_year)
+            except ValueError:
+                return RedirectResponse(
+                    f"/projects/{project_id}/settings?error=Invalid+year",
+                    status_code=303,
+                )
+            session.execute(
+                ProjectAnnualData.__table__.delete().where(
+                    ProjectAnnualData.project_id == project.id,
+                    ProjectAnnualData.year == yr,
+                )
+            )
+            session.commit()
+            return RedirectResponse(
+                f"/projects/{project_id}/settings?saved=1", status_code=303
+            )
+
+        # ── action: add a new year ─────────────────────────────────────────
+        if action == "add_year":
+            raw = (form.get("add_year") or "").strip()
+            if not raw:
+                return RedirectResponse(
+                    f"/projects/{project_id}/settings?error=Enter+a+year+first",
+                    status_code=303,
+                )
+            try:
+                yr = int(raw)
+            except ValueError:
+                return RedirectResponse(
+                    f"/projects/{project_id}/settings?error=Invalid+year",
+                    status_code=303,
+                )
+            existing = session.scalar(
+                select(ProjectAnnualData).where(
+                    ProjectAnnualData.project_id == project.id,
+                    ProjectAnnualData.year == yr,
+                )
+            )
+            if existing is None:
+                session.add(ProjectAnnualData(project_id=project.id, year=yr))
+                session.commit()
+            return RedirectResponse(
+                f"/projects/{project_id}/settings?saved=1", status_code=303
+            )
+
+        # ── action: save all ───────────────────────────────────────────────
+        try:
+            new_name = (form.get("name") or "").strip()
+            if not new_name:
+                raise ValueError("Project name cannot be empty.")
+            project.name = new_name
+            project.description = (form.get("description") or "").strip() or None
+
+            # Parse form into { year: { total, starting, lines: [(idx, label, prefix, amount_str)] } }
+            year_data: dict[int, dict] = {}
+            for key, value in form.multi_items():
+                m = re.match(r"^year_(\d+)_(total|starting)$", key)
+                if m:
+                    yr = int(m.group(1))
+                    field = m.group(2)
+                    year_data.setdefault(yr, {"lines": {}})[field] = value
+                    continue
+                m = re.match(r"^year_(\d+)_line_(\d+)_(label|prefix|amount)$", key)
+                if m:
+                    yr = int(m.group(1))
+                    idx = int(m.group(2))
+                    field = m.group(3)
+                    yd = year_data.setdefault(yr, {"lines": {}})
+                    yd["lines"].setdefault(idx, {})[field] = value
+
+            for yr, data in year_data.items():
+                ad = session.scalar(
+                    select(ProjectAnnualData).where(
+                        ProjectAnnualData.project_id == project.id,
+                        ProjectAnnualData.year == yr,
+                    )
+                )
+                if ad is None:
+                    continue  # year was deleted concurrently; skip
+
+                ad.total_budget = _parse_slo_amount(data.get("total"))
+                ad.starting_balance = _parse_slo_amount(data.get("starting"))
+
+                # Replace lines wholesale
+                session.execute(
+                    ProjectBudgetLine.__table__.delete().where(
+                        ProjectBudgetLine.project_annual_data_id == ad.id
+                    )
+                )
+                session.flush()
+                position = 0
+                for idx in sorted(data["lines"].keys()):
+                    line_in = data["lines"][idx]
+                    label = (line_in.get("label") or "").strip()
+                    amt_raw = (line_in.get("amount") or "").strip()
+                    if not label and not amt_raw:
+                        continue  # blank row → drop
+                    if not label:
+                        raise ValueError(f"Year {yr}: a budget line is missing a label.")
+                    if not amt_raw:
+                        raise ValueError(f"Year {yr}: line {label!r} is missing an amount.")
+                    amt = _parse_slo_amount(amt_raw, total_budget=ad.total_budget)
+                    if amt is None:
+                        raise ValueError(f"Year {yr}: line {label!r} amount is invalid.")
+                    session.add(
+                        ProjectBudgetLine(
+                            project_annual_data_id=ad.id,
+                            label=label,
+                            account_prefix=(line_in.get("prefix") or "").strip() or None,
+                            amount=amt,
+                            position=position,
+                        )
+                    )
+                    position += 1
+
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            from urllib.parse import quote
+            return RedirectResponse(
+                f"/projects/{project_id}/settings?error={quote(str(exc))}",
+                status_code=303,
+            )
+
+    return RedirectResponse(
+        f"/projects/{project_id}/settings?saved=1", status_code=303
+    )
