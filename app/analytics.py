@@ -152,6 +152,33 @@ class StructureRow:
     account_prefix: Optional[str]
     budgeted: Optional[Decimal]
     spent: Decimal
+    projected: Optional[Decimal]  # year-end projection; None when no activity yet
+
+
+def _year_progress(session: Session, project_id: int, year: int) -> tuple[int, int]:
+    """Return (days_elapsed, days_in_year) for this project's transactions in
+    `year`. days_elapsed is anchored to the latest transaction posting date
+    so the projection is consistent with project_summary."""
+    last_date = session.scalar(
+        select(func.max(Transaction.posting_date))
+        .where(
+            Transaction.project_id == project_id,
+            func.extract("year", Transaction.posting_date) == year,
+        )
+    )
+    days_in_year = 366 if calendar.isleap(year) else 365
+    if last_date is None:
+        return 0, days_in_year
+    days_elapsed = (last_date - date(year, 1, 1)).days + 1
+    return days_elapsed, days_in_year
+
+
+def _project(value: Decimal, days_elapsed: int, days_in_year: int) -> Optional[Decimal]:
+    if days_elapsed <= 0:
+        return None
+    return (value * Decimal(days_in_year) / Decimal(days_elapsed)).quantize(
+        Decimal("0.01")
+    )
 
 
 def structure_breakdown(
@@ -193,6 +220,8 @@ def structure_breakdown(
         else:
             spent_by_id[match_id] += amount
 
+    days_elapsed, days_in_year = _year_progress(session, project.id, year)
+
     rows: list[StructureRow] = [
         StructureRow(
             line_id=line.id,
@@ -200,6 +229,7 @@ def structure_breakdown(
             account_prefix=line.account_prefix,
             budgeted=line.amount,
             spent=spent_by_id[line.id],
+            projected=_project(spent_by_id[line.id], days_elapsed, days_in_year),
         )
         for line in lines
     ]
@@ -210,9 +240,32 @@ def structure_breakdown(
             account_prefix=None,
             budgeted=None,
             spent=other_spent,
+            projected=_project(other_spent, days_elapsed, days_in_year),
         )
     )
     return rows
+
+
+def monthly_totals(
+    session: Session, project: Project, year: int
+) -> list[float]:
+    """Return spend per month for the given project+year as a 12-element list
+    indexed 0..11 (Jan..Dec). Months with no transactions contribute 0.0."""
+    rows = session.execute(
+        select(
+            func.extract("month", Transaction.posting_date).label("mo"),
+            func.sum(Transaction.amount).label("total"),
+        )
+        .where(
+            Transaction.project_id == project.id,
+            func.extract("year", Transaction.posting_date) == year,
+        )
+        .group_by("mo")
+    ).all()
+    result = [0.0] * 12
+    for mo, total in rows:
+        result[int(mo) - 1] = float(total)
+    return result
 
 
 @dataclass

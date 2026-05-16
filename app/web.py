@@ -1100,7 +1100,25 @@ def project_detail(
 
         grid = per_person_month(session, project, selected_year)
 
+        from app.analytics import monthly_totals
+        monthly = monthly_totals(session, project, selected_year)
+
     structure_has_budget = any(r.budgeted is not None for r in structure)
+
+    # Chart data: serialised as JSON in the template.
+    # Donut excludes zero-spend categories so empty slices don't clutter.
+    donut_data = [
+        {"label": r.label, "spent": float(r.spent)}
+        for r in structure
+        if float(r.spent) != 0
+    ]
+    monthly_chart = {
+        "labels": MONTHS_SHORT,
+        "totals": monthly,
+        "monthly_budget": (
+            float(budget) / 12.0 if budget and budget > 0 else None
+        ),
+    }
 
     return templates.TemplateResponse(
         request,
@@ -1121,6 +1139,8 @@ def project_detail(
             "structure_has_budget": structure_has_budget,
             "grid": grid,
             "month_names": MONTHS_SHORT,
+            "monthly_chart": monthly_chart,
+            "donut_data": donut_data,
         },
     )
 

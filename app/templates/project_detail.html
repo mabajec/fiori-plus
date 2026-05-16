@@ -85,20 +85,47 @@
   {% endif %}
 </section>
 
+{# ───── Monthly spend trend ───── #}
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 mb-4">
+  <h2 class="text-base font-semibold mb-3">Monthly spend</h2>
+  <div class="relative" style="height: 240px;">
+    <canvas id="monthly-trend"></canvas>
+  </div>
+</section>
+
 {# ───── Structure breakdown ───── #}
 <section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mb-4">
   <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700">
     <h2 class="text-base font-semibold">Spending by category</h2>
     <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Click any Spent value to see the underlying transactions.</p>
   </div>
+
+  {% if donut_data %}
+    <div class="px-5 py-4 border-b border-slate-200 dark:border-slate-700 flex items-center gap-6">
+      <div class="relative flex-shrink-0" style="width: 200px; height: 200px;">
+        <canvas id="category-donut"></canvas>
+      </div>
+      <ul class="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs">
+        {% for slice in donut_data %}
+          <li class="flex items-center gap-2">
+            <span class="w-3 h-3 rounded-sm flex-shrink-0" data-donut-legend="{{ loop.index0 }}"></span>
+            <span class="flex-1 truncate text-slate-600 dark:text-slate-300">{{ slice.label }}</span>
+            <span class="tabular-nums text-slate-500 dark:text-slate-400">€ {{ slice.spent | slo_money }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
   <table class="w-full text-sm">
     <thead class="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
       <tr class="text-left text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
         <th class="px-4 py-2 font-medium">Category</th>
         <th class="px-4 py-2 font-medium">Account prefix</th>
         <th class="px-4 py-2 font-medium text-right">Spent</th>
+        <th class="px-4 py-2 font-medium text-right">Projected year-end</th>
         <th class="px-4 py-2 font-medium text-right">Budget</th>
-        <th class="px-4 py-2 font-medium text-right w-32">Status</th>
+        <th class="px-4 py-2 font-medium text-right w-40">Status</th>
       </tr>
     </thead>
     <tbody>
@@ -117,12 +144,16 @@
               € {{ row.spent | slo_money }}
             </button>
           </td>
+          <td class="px-4 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+            {% if row.projected is not none %}€ {{ row.projected | slo_money }}{% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
+          </td>
           <td class="px-4 py-2 text-right tabular-nums">
             {% if row.budgeted is not none %}€ {{ row.budgeted | slo_money }}{% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
           </td>
           <td class="px-4 py-2 text-right">
             {% if row.budgeted is not none and row.budgeted > 0 %}
               {% set pct = (row.spent / row.budgeted * 100) | float %}
+              {% set proj_pct = ((row.projected or row.spent) / row.budgeted * 100) | float %}
               {% if pct > 100 %}
                 {% set badge_classes = 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300' %}
                 {% set dot = 'bg-red-500' %}
@@ -131,13 +162,17 @@
                 {% set badge_classes = 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300' %}
                 {% set dot = 'bg-amber-500' %}
                 {% set label = 'near' %}
+              {% elif proj_pct > 100 %}
+                {% set badge_classes = 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300' %}
+                {% set dot = 'bg-amber-500' %}
+                {% set label = 'proj. over' %}
               {% else %}
                 {% set badge_classes = 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300' %}
                 {% set dot = 'bg-emerald-500' %}
                 {% set label = 'in budget' %}
               {% endif %}
               <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium {{ badge_classes }}">
-                <span class="w-1.5 h-1.5 rounded-full {{ dot }}"></span>{{ label }} · {{ '%.0f' % pct }}%
+                <span class="w-1.5 h-1.5 rounded-full {{ dot }}"></span>{{ label }} · {{ '%.0f' % pct }}% / {{ '%.0f' % proj_pct }}%
               </span>
             {% else %}
               <span class="text-slate-400 dark:text-slate-500 text-xs">—</span>
@@ -221,4 +256,88 @@
 </section>
 
 {% endif %}
+
+<script>
+  (function () {
+    const isDark = document.documentElement.classList.contains('dark');
+    const slo = (n) => (n ?? 0).toLocaleString('sl-SI', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const axisColor = isDark ? '#94a3b8' : '#64748b';
+    const gridColor = isDark ? 'rgba(148, 163, 184, 0.15)' : 'rgba(100, 116, 139, 0.15)';
+    // Slate-friendly palette that works in both modes
+    const palette = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899', '#14b8a6', '#f97316'];
+
+    // ─── Monthly trend ───────────────────────────────────────────────
+    const monthly = {{ monthly_chart | tojson }};
+    const monthlyCanvas = document.getElementById('monthly-trend');
+    if (monthlyCanvas) {
+      const datasets = [{
+        type: 'bar',
+        label: 'Spent',
+        data: monthly.totals,
+        backgroundColor: '#6366f1',
+        borderRadius: 4,
+      }];
+      if (monthly.monthly_budget !== null) {
+        // Flat reference line at the monthly-average budget.
+        datasets.push({
+          type: 'line',
+          label: 'Monthly avg budget (annual ÷ 12)',
+          data: Array(12).fill(monthly.monthly_budget),
+          borderColor: '#f59e0b',
+          backgroundColor: 'transparent',
+          borderDash: [6, 4],
+          pointRadius: 0,
+          tension: 0,
+        });
+      }
+      new Chart(monthlyCanvas, {
+        data: { labels: monthly.labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { labels: { color: axisColor, boxWidth: 12 } },
+            tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: € ${slo(ctx.parsed.y)}` } },
+          },
+          scales: {
+            x: { ticks: { color: axisColor }, grid: { color: gridColor } },
+            y: {
+              ticks: { color: axisColor, callback: (v) => '€ ' + slo(v) },
+              grid: { color: gridColor },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    }
+
+    // ─── Category donut ──────────────────────────────────────────────
+    const donut = {{ donut_data | tojson }};
+    const donutCanvas = document.getElementById('category-donut');
+    if (donutCanvas && donut.length > 0) {
+      const colors = donut.map((_, i) => palette[i % palette.length]);
+      new Chart(donutCanvas, {
+        type: 'doughnut',
+        data: {
+          labels: donut.map((d) => d.label),
+          datasets: [{ data: donut.map((d) => d.spent), backgroundColor: colors, borderWidth: 0 }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: (ctx) => `${ctx.label}: € ${slo(ctx.parsed)}` } },
+          },
+          cutout: '60%',
+        },
+      });
+      // Color the swatches in the legend list.
+      document.querySelectorAll('[data-donut-legend]').forEach((el) => {
+        const i = parseInt(el.dataset.donutLegend, 10);
+        el.style.backgroundColor = colors[i];
+      });
+    }
+  })();
+</script>
 {% endblock %}
