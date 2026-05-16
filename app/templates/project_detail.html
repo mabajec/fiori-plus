@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} — Fiori{% endblock %}
+{% block content %}
+<div class="mb-2">
+  <a href="/projects" class="text-sm text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400">← All projects</a>
+</div>
+
+<div class="mb-6 flex items-start justify-between gap-4">
+  <div class="flex-1 min-w-0">
+    <h1 class="text-2xl font-semibold mb-1">{{ project.name }}</h1>
+    <p class="text-xs text-slate-400 dark:text-slate-500 font-mono">{{ project.pps_element }}</p>
+    {% if project.description %}
+      <p class="text-sm text-slate-600 dark:text-slate-300 mt-2">{{ project.description }}</p>
+    {% endif %}
+  </div>
+  <a href="/projects/{{ project.id }}/settings"
+     class="text-sm text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 whitespace-nowrap">
+    Edit settings →
+  </a>
+</div>
+
+{% if summary.latest_year is none %}
+  <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 text-sm text-slate-500 dark:text-slate-400">
+    No transactions imported for this project yet.
+  </div>
+{% else %}
+
+{% if available_years|length > 1 %}
+  <div class="mb-4 flex items-center gap-2 text-sm">
+    <span class="text-slate-500 dark:text-slate-400">Year:</span>
+    {% for y in available_years %}
+      <a href="/projects/{{ project.id }}?year={{ y }}"
+         class="px-3 py-1 rounded-lg {% if y == year %}bg-indigo-600 text-white font-medium{% else %}bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700{% endif %}">{{ y }}</a>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{# ───── Summary card ───── #}
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 mb-4">
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+    <div>
+      <div class="text-xs text-slate-500 dark:text-slate-400">Spent in {{ year }}</div>
+      <div class="text-xl font-semibold tabular-nums">€ {{ summary.ytd_spent | slo_money }}</div>
+      <div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">All time: € {{ summary.all_time_spent | slo_money }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-500 dark:text-slate-400">Projected year-end</div>
+      <div class="text-xl font-semibold tabular-nums">
+        {% if summary.projection is not none %}€ {{ summary.projection | slo_money }}{% else %}—{% endif %}
+      </div>
+      <div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{{ summary.days_elapsed }}/{{ summary.days_in_year }} days</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-500 dark:text-slate-400">Budget</div>
+      <div class="text-xl font-semibold tabular-nums">
+        {% if budget is not none %}€ {{ budget | slo_money }}{% else %}<span class="text-slate-400 dark:text-slate-500 font-normal text-base">not set</span>{% endif %}
+      </div>
+      {% if starting_balance is not none %}
+        <div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">Starting balance: € {{ starting_balance | slo_money }}</div>
+      {% endif %}
+    </div>
+    <div>
+      <div class="text-xs text-slate-500 dark:text-slate-400">Last transaction</div>
+      <div class="text-xl font-semibold tabular-nums">
+        {% if summary.last_txn_date %}{{ summary.last_txn_date.strftime('%Y-%m-%d') }}{% else %}—{% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if budget %}
+    <div class="mt-5">
+      <div class="flex items-center justify-between text-xs mb-1">
+        <span class="text-slate-500 dark:text-slate-400">Spent / budget</span>
+        <span class="tabular-nums {% if spent_pct > 100 %}text-red-600 dark:text-red-400 font-semibold{% else %}text-slate-600 dark:text-slate-300{% endif %}">{{ '%.1f' % spent_pct }}%</span>
+      </div>
+      <div class="relative h-2 bg-slate-100 dark:bg-slate-900 rounded-full overflow-hidden">
+        <div class="absolute inset-y-0 left-0 {{ bar_color }}" style="width: {{ bar_pct }}%"></div>
+      </div>
+      {% if summary.projection is not none %}
+        <div class="relative h-3 mt-0.5">
+          <div class="absolute top-0 -translate-x-1/2 text-[10px] text-slate-500 dark:text-slate-400 whitespace-nowrap" style="left: {{ tick_pct }}%">↑ projected {{ '%.0f' % projection_pct }}%</div>
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
+
+{# ───── Structure breakdown ───── #}
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden mb-4">
+  <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700">
+    <h2 class="text-base font-semibold">Spending by category</h2>
+    <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Click any Spent value to see the underlying transactions.</p>
+  </div>
+  <table class="w-full text-sm">
+    <thead class="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
+      <tr class="text-left text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+        <th class="px-4 py-2 font-medium">Category</th>
+        <th class="px-4 py-2 font-medium">Account prefix</th>
+        <th class="px-4 py-2 font-medium text-right">Spent</th>
+        <th class="px-4 py-2 font-medium text-right">Budget</th>
+        <th class="px-4 py-2 font-medium text-right w-32">Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in structure %}
+        {% set row_idx = loop.index0 %}
+        {% set is_other = row.line_id == 'other' %}
+        <tr class="border-b border-slate-100 dark:border-slate-700 {% if is_other %}bg-slate-50/60 dark:bg-slate-900/30{% endif %}">
+          <td class="px-4 py-2 {% if is_other %}font-semibold uppercase tracking-wide text-xs text-slate-500 dark:text-slate-400{% endif %}">{{ row.label }}</td>
+          <td class="px-4 py-2 text-slate-500 dark:text-slate-400 font-mono text-xs">{{ row.account_prefix or '' }}</td>
+          <td class="px-4 py-2 text-right tabular-nums">
+            <button type="button"
+                    hx-get="/projects/{{ project.id }}/category-transactions?year={{ year }}&line_id={{ row.line_id }}"
+                    hx-target="#cat-exp-{{ row_idx }}"
+                    hx-swap="innerHTML"
+                    class="hover:underline cursor-pointer {% if row.spent < 0 %}text-red-600 dark:text-red-400{% endif %}">
+              € {{ row.spent | slo_money }}
+            </button>
+          </td>
+          <td class="px-4 py-2 text-right tabular-nums">
+            {% if row.budgeted is not none %}€ {{ row.budgeted | slo_money }}{% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
+          </td>
+          <td class="px-4 py-2 text-right">
+            {% if row.budgeted is not none and row.budgeted > 0 %}
+              {% set pct = (row.spent / row.budgeted * 100) | float %}
+              {% if pct > 100 %}
+                {% set badge_classes = 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300' %}
+                {% set dot = 'bg-red-500' %}
+                {% set label = 'over' %}
+              {% elif pct >= 80 %}
+                {% set badge_classes = 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300' %}
+                {% set dot = 'bg-amber-500' %}
+                {% set label = 'near' %}
+              {% else %}
+                {% set badge_classes = 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300' %}
+                {% set dot = 'bg-emerald-500' %}
+                {% set label = 'in budget' %}
+              {% endif %}
+              <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium {{ badge_classes }}">
+                <span class="w-1.5 h-1.5 rounded-full {{ dot }}"></span>{{ label }} · {{ '%.0f' % pct }}%
+              </span>
+            {% else %}
+              <span class="text-slate-400 dark:text-slate-500 text-xs">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr id="cat-exp-{{ row_idx }}"></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if not structure_has_budget %}
+    <div class="px-5 py-3 text-xs text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/30">
+      No budget categories defined for {{ year }}.
+      <a href="/projects/{{ project.id }}/settings" class="text-indigo-600 dark:text-indigo-400 hover:underline">Set them up</a>
+      to see spending-vs-budget per category.
+    </div>
+  {% endif %}
+</section>
+
+{# ───── Per-person × month grid ───── #}
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+  <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700">
+    <h2 class="text-base font-semibold">Spending by person and month</h2>
+    <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+      Only transactions tagged with an employee number. Click any cell to see them.
+    </p>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
+        <tr class="text-left text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+          <th class="px-3 py-2 font-medium">Employee</th>
+          {% for m in month_names %}
+            <th class="px-2 py-2 font-medium text-right">{{ m }}</th>
+          {% endfor %}
+          <th class="px-3 py-2 font-medium text-right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for emp in grid.employees %}
+          {% set emp_idx = loop.index0 %}
+          <tr class="border-b border-slate-100 dark:border-slate-700">
+            <td class="px-3 py-2 whitespace-nowrap">
+              {% if grid.names.get(emp) %}
+                <div class="font-medium">{{ grid.names[emp] }}</div>
+                <div class="text-xs text-slate-400 dark:text-slate-500 tabular-nums">{{ emp }}</div>
+              {% else %}
+                <span class="tabular-nums font-medium">{{ emp }}</span>
+              {% endif %}
+            </td>
+            {% for m in range(1, 13) %}
+              {% set amt = grid.grid.get(emp, {}).get(m) %}
+              <td class="px-2 py-2 text-right tabular-nums">
+                {% if amt is not none %}
+                  <button type="button"
+                          hx-get="/projects/{{ project.id }}/cell?year={{ year }}&month={{ m }}&employee={{ emp|urlencode }}"
+                          hx-target="#exp-{{ emp_idx }}"
+                          hx-swap="innerHTML"
+                          class="hover:underline cursor-pointer {% if amt < 0 %}text-red-600 dark:text-red-400{% endif %}">
+                    {{ amt | slo_money }}
+                  </button>
+                {% else %}
+                  <span class="text-slate-300 dark:text-slate-700">·</span>
+                {% endif %}
+              </td>
+            {% endfor %}
+            <td class="px-3 py-2 text-right tabular-nums font-semibold">{{ grid.totals_by_emp[emp] | slo_money }}</td>
+          </tr>
+          <tr id="exp-{{ emp_idx }}"></tr>
+        {% endfor %}
+        {% if not grid.employees %}
+          <tr>
+            <td colspan="14" class="px-4 py-8 text-center text-slate-400 dark:text-slate-500 text-sm">
+              No transactions in {{ year }}.
+            </td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% endif %}
+{% endblock %}

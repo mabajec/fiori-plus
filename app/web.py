@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -16,7 +16,14 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import SessionLocal
 from app.importer import import_file, parse_amount, peek_pps_element
-from app.models import ImportRun, Project, Transaction, User
+from app.models import (
+    ImportRun,
+    Project,
+    ProjectAnnualData,
+    ProjectBudgetLine,
+    Transaction,
+    User,
+)
 
 
 PAGE_SIZE = 50
@@ -37,6 +44,7 @@ def _format_slo_money(value: Decimal | None) -> str:
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates.env.filters["slo_money"] = _format_slo_money
 
 
 @dataclass
@@ -576,8 +584,115 @@ def update_transaction(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _CategoryWarning:
+    label: str
+    pct: float                # current spent / budget, ≥ 80
+    pct_fmt: str              # "120%"
+    severity: str             # "over" (>100) or "near" (80..100)
+
+
+@dataclass
+class _ProjectCardView:
+    id: int
+    name: str
+    pps_element: str
+    description: str | None
+    latest_year: int | None
+    ytd_spent_fmt: str
+    projection_fmt: str
+    budget_fmt: str | None
+    budget: Decimal | None        # raw, for conditional logic
+    projection: Decimal | None
+    last_txn_date_fmt: str
+    spent_pct: float              # raw % (may exceed 100)
+    spent_pct_fmt: str            # formatted "N.N"
+    projection_pct_fmt: str
+    bar_pct: float                # clamped 0..100
+    tick_pct: float               # clamped 0..100
+    bar_color: str                # Tailwind classes
+    warnings: list[_CategoryWarning] = field(default_factory=list)
+
+
+def _card_view(summary) -> _ProjectCardView:
+    from app.analytics import ProjectSummary  # noqa: F401 (type hint reference)
+
+    p = summary.project
+    budget = summary.annual.total_budget if summary.annual else None
+
+    spent_pct = (
+        float(summary.ytd_spent) / float(budget) * 100
+        if budget and budget > 0
+        else 0.0
+    )
+    projection_pct = (
+        float(summary.projection) / float(budget) * 100
+        if budget and budget > 0 and summary.projection is not None
+        else 0.0
+    )
+    if spent_pct < 80:
+        bar_color = "bg-emerald-500 dark:bg-emerald-600"
+    elif spent_pct < 100:
+        bar_color = "bg-amber-500 dark:bg-amber-600"
+    else:
+        bar_color = "bg-red-500 dark:bg-red-600"
+
+    return _ProjectCardView(
+        id=p.id,
+        name=p.name,
+        pps_element=p.pps_element,
+        description=p.description,
+        latest_year=summary.latest_year,
+        ytd_spent_fmt=_format_slo_money(summary.ytd_spent),
+        projection_fmt=(
+            _format_slo_money(summary.projection)
+            if summary.projection is not None else "—"
+        ),
+        budget_fmt=_format_slo_money(budget) if budget is not None else None,
+        budget=budget,
+        projection=summary.projection,
+        last_txn_date_fmt=(
+            summary.last_txn_date.strftime("%Y-%m-%d")
+            if summary.last_txn_date else "—"
+        ),
+        spent_pct=spent_pct,
+        spent_pct_fmt=f"{spent_pct:.1f}",
+        projection_pct_fmt=f"{projection_pct:.0f}",
+        bar_pct=min(100.0, spent_pct),
+        tick_pct=min(100.0, projection_pct),
+        bar_color=bar_color,
+    )
+
+
+def _card_warnings(structure) -> list[_CategoryWarning]:
+    """Pick rows where spent/budget ≥ 80%. Worst first (highest pct)."""
+    items: list[_CategoryWarning] = []
+    for row in structure:
+        if row.budgeted is None or row.budgeted <= 0:
+            continue
+        pct = float(row.spent) / float(row.budgeted) * 100
+        if pct > 100:
+            severity = "over"
+        elif pct >= 80:
+            severity = "near"
+        else:
+            continue
+        items.append(
+            _CategoryWarning(
+                label=row.label,
+                pct=pct,
+                pct_fmt=f"{pct:.0f}%",
+                severity=severity,
+            )
+        )
+    items.sort(key=lambda w: (0 if w.severity == "over" else 1, -w.pct))
+    return items
+
+
 @app.get("/projects", response_class=HTMLResponse)
 def projects_list(request: Request) -> HTMLResponse:
+    from app.analytics import project_summary, structure_breakdown
+
     with SessionLocal() as session:
         user = _current_user(session)
         projects = list(
@@ -587,8 +702,18 @@ def projects_list(request: Request) -> HTMLResponse:
                 .order_by(Project.name)
             )
         )
+        cards = []
+        for p in projects:
+            summary = project_summary(session, p)
+            card = _card_view(summary)
+            if summary.latest_year is not None:
+                structure = structure_breakdown(
+                    session, p, summary.latest_year
+                )
+                card.warnings = _card_warnings(structure)
+            cards.append(card)
     return templates.TemplateResponse(
-        request, "projects.html", {"projects": projects}
+        request, "projects.html", {"cards": cards}
     )
 
 
@@ -871,4 +996,279 @@ async def save_project_settings(request: Request, project_id: int) -> HTMLRespon
 
     return RedirectResponse(
         f"/projects/{project_id}/settings?saved=1", status_code=303
+    )
+
+
+# ---------------------------------------------------------------------------
+# Project detail page (View A drill-down + View B grid)
+# ---------------------------------------------------------------------------
+
+
+def _all_years_for_project(session: Session, project_id: int) -> list[int]:
+    years = session.scalars(
+        select(func.distinct(func.extract("year", Transaction.posting_date)))
+        .where(Transaction.project_id == project_id)
+    )
+    return sorted({int(y) for y in years if y is not None}, reverse=True)
+
+
+@app.get("/projects/{project_id}", response_class=HTMLResponse)
+def project_detail(
+    request: Request,
+    project_id: int,
+    year: Optional[int] = None,
+) -> HTMLResponse:
+    from app.analytics import (
+        MONTHS_SHORT,
+        per_person_month,
+        project_summary,
+        structure_breakdown,
+    )
+
+    with SessionLocal() as session:
+        user = _current_user(session)
+        project = session.scalar(
+            select(Project).where(
+                Project.id == project_id, Project.owner_user_id == user.id
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        summary = project_summary(session, project)
+        available_years = _all_years_for_project(session, project.id)
+        if not available_years:
+            return templates.TemplateResponse(
+                request,
+                "project_detail.html",
+                {
+                    "project": project,
+                    "summary": summary,
+                    "available_years": [],
+                    "year": None,
+                },
+            )
+
+        selected_year = year if year in available_years else available_years[0]
+
+        structure = structure_breakdown(session, project, selected_year)
+        # If the selected year is the same as summary.latest_year, reuse its
+        # annual data; otherwise fetch the year-specific row.
+        if summary.annual and summary.annual.year == selected_year:
+            annual = summary.annual
+        else:
+            annual = session.scalar(
+                select(ProjectAnnualData).where(
+                    ProjectAnnualData.project_id == project.id,
+                    ProjectAnnualData.year == selected_year,
+                )
+            )
+        budget = annual.total_budget if annual else None
+        starting_balance = annual.starting_balance if annual else None
+
+        # Spending in the selected year (recompute if different from latest_year).
+        if selected_year == summary.latest_year:
+            ytd_for_year = summary.ytd_spent
+        else:
+            ytd_for_year = session.scalar(
+                select(func.coalesce(func.sum(Transaction.amount), 0))
+                .where(
+                    Transaction.project_id == project.id,
+                    func.extract("year", Transaction.posting_date) == selected_year,
+                )
+            ) or Decimal(0)
+
+        # Bar / projection visual numbers.
+        spent_pct = (
+            float(ytd_for_year) / float(budget) * 100
+            if budget and budget > 0 else 0.0
+        )
+        if summary.projection is not None and budget and budget > 0 and selected_year == summary.latest_year:
+            projection_pct = float(summary.projection) / float(budget) * 100
+        else:
+            projection_pct = 0.0
+        if spent_pct < 80:
+            bar_color = "bg-emerald-500 dark:bg-emerald-600"
+        elif spent_pct < 100:
+            bar_color = "bg-amber-500 dark:bg-amber-600"
+        else:
+            bar_color = "bg-red-500 dark:bg-red-600"
+
+        # Replace summary.ytd_spent with the selected year's value so the
+        # template renders consistently when toggling years.
+        summary.ytd_spent = ytd_for_year
+
+        grid = per_person_month(session, project, selected_year)
+
+    structure_has_budget = any(r.budgeted is not None for r in structure)
+
+    return templates.TemplateResponse(
+        request,
+        "project_detail.html",
+        {
+            "project": project,
+            "summary": summary,
+            "available_years": available_years,
+            "year": selected_year,
+            "budget": budget,
+            "starting_balance": starting_balance,
+            "spent_pct": spent_pct,
+            "projection_pct": projection_pct,
+            "bar_pct": min(100.0, spent_pct),
+            "tick_pct": min(100.0, projection_pct),
+            "bar_color": bar_color,
+            "structure": structure,
+            "structure_has_budget": structure_has_budget,
+            "grid": grid,
+            "month_names": MONTHS_SHORT,
+        },
+    )
+
+
+@app.get("/projects/{project_id}/cell", response_class=HTMLResponse)
+def cell_expansion(
+    request: Request,
+    project_id: int,
+    year: int,
+    month: int,
+    employee: str = "",
+) -> HTMLResponse:
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="month must be 1..12")
+
+    with SessionLocal() as session:
+        user = _current_user(session)
+        project = session.scalar(
+            select(Project).where(
+                Project.id == project_id, Project.owner_user_id == user.id
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        where_clauses = [
+            Transaction.project_id == project.id,
+            func.extract("year", Transaction.posting_date) == year,
+            func.extract("month", Transaction.posting_date) == month,
+        ]
+        if employee:
+            where_clauses.append(Transaction.employee == employee)
+        else:
+            where_clauses.append(Transaction.employee.is_(None))
+
+        txns = list(
+            session.scalars(
+                select(Transaction)
+                .where(*where_clauses)
+                .order_by(Transaction.posting_date, Transaction.id)
+            )
+        )
+
+    from app.analytics import MONTHS_SHORT, build_employee_name_map
+
+    total = sum((t.amount for t in txns), start=Decimal("0"))
+    if employee:
+        with SessionLocal() as session:
+            names = build_employee_name_map(session, project_id)
+        display = (
+            f"{names[employee]} ({employee})" if employee in names else f"employee {employee}"
+        )
+    else:
+        display = "(no employee)"
+    heading = f"{MONTHS_SHORT[month - 1]} {year} — {display}"
+
+    return templates.TemplateResponse(
+        request,
+        "_cell_expansion.html",
+        {"txns": txns, "total": total, "heading": heading},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Category breakdown: click a Spent value → expand transactions for that line
+# ---------------------------------------------------------------------------
+
+
+@app.get("/projects/{project_id}/category-transactions", response_class=HTMLResponse)
+def category_transactions(
+    request: Request,
+    project_id: int,
+    year: int,
+    line_id: str,  # numeric ProjectBudgetLine.id, or "other"
+) -> HTMLResponse:
+    from sqlalchemy import not_
+
+    from app.analytics import OTHER_LINE_ID
+
+    with SessionLocal() as session:
+        user = _current_user(session)
+        project = session.scalar(
+            select(Project).where(
+                Project.id == project_id, Project.owner_user_id == user.id
+            )
+        )
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # Pull all budget-line prefixes for this project+year (for OTHER, and
+        # for the "exclude longer prefixes" trick on a specific line).
+        annual = session.scalar(
+            select(ProjectAnnualData).where(
+                ProjectAnnualData.project_id == project.id,
+                ProjectAnnualData.year == year,
+            )
+        )
+        all_lines = list(annual.budget_lines) if annual else []
+        all_prefixes = [l.account_prefix for l in all_lines if l.account_prefix]
+
+        where_clauses = [
+            Transaction.project_id == project.id,
+            func.extract("year", Transaction.posting_date) == year,
+        ]
+
+        if line_id == OTHER_LINE_ID:
+            # OTHER = matches none of the defined prefixes.
+            for prefix in all_prefixes:
+                where_clauses.append(
+                    not_(Transaction.account_code.like(f"{prefix}%"))
+                )
+            heading = f"OTHER ({year})"
+        else:
+            try:
+                lid = int(line_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="bad line_id")
+            target = next((l for l in all_lines if l.id == lid), None)
+            if target is None or not target.account_prefix:
+                raise HTTPException(
+                    status_code=404, detail="Budget line not found or has no prefix"
+                )
+            # Longest-prefix-match semantics: include rows starting with this
+            # line's prefix but not with a longer prefix that also exists.
+            where_clauses.append(
+                Transaction.account_code.like(f"{target.account_prefix}%")
+            )
+            for other_prefix in all_prefixes:
+                if (
+                    len(other_prefix) > len(target.account_prefix)
+                    and other_prefix.startswith(target.account_prefix)
+                ):
+                    where_clauses.append(
+                        not_(Transaction.account_code.like(f"{other_prefix}%"))
+                    )
+            heading = f"{target.label} (prefix {target.account_prefix}, {year})"
+
+        txns = list(
+            session.scalars(
+                select(Transaction)
+                .where(*where_clauses)
+                .order_by(Transaction.posting_date, Transaction.id)
+            )
+        )
+
+    total = sum((t.amount for t in txns), start=Decimal("0"))
+    return templates.TemplateResponse(
+        request,
+        "_category_expansion.html",
+        {"txns": txns, "total": total, "heading": heading},
     )
