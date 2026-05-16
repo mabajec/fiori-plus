@@ -15,12 +15,13 @@ real domain.
    ```
 
 2. **Create the inputs directory.** TSV exports from the source financial
-   system will be `scp`'d into this directory; the container mounts it
-   read-only.
+   system will live here; the container mounts it read-only. By default
+   this is `./inputs` inside the repo — `cp file.tsv inputs/` "just works".
+   If you'd rather host it elsewhere (a separate data volume, say), set
+   `HOST_INPUTS_DIR` in `.env.prod`.
 
    ```bash
-   sudo mkdir -p /srv/fiori/inputs
-   sudo chown $USER /srv/fiori/inputs
+   mkdir -p inputs
    ```
 
 3. **Copy and edit the env file.**
@@ -37,8 +38,9 @@ real domain.
    python3 -c "import secrets; print(secrets.token_urlsafe(64))"   # SESSION_SECRET
    ```
 
-   The defaults for `APP_PORT` (8000) and `HOST_INPUTS_DIR`
-   (`/srv/fiori/inputs`) are fine unless you have a reason to change them.
+   The default `APP_PORT` (8000) is usually fine; `HOST_INPUTS_DIR`
+   defaults to `./inputs` (in the repo) and only needs to be set if you
+   want the directory somewhere else.
 
 4. **Build and start.**
 

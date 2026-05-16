@@ -43,8 +43,10 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
-      # TSV exports the admin scp's onto the host land here.
-      - ${HOST_INPUTS_DIR:?set HOST_INPUTS_DIR in .env.prod}:/app/inputs:ro
+      # TSV exports go here. Defaults to ./inputs relative to this compose
+      # file (so `cp file.tsv inputs/` on the server "just works"); override
+      # with HOST_INPUTS_DIR in .env.prod if you want a different location.
+      - ${HOST_INPUTS_DIR:-./inputs}:/app/inputs:ro
 
 volumes:
   db_data:
