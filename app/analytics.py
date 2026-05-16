@@ -38,16 +38,21 @@ def _extract_name(text: str | None) -> str | None:
 
 
 def build_employee_name_map(
-    session: Session, project_id: int
+    session: Session, project_ids: int | list[int]
 ) -> dict[str, str]:
-    """For one project, map employee_number → most-common extracted name.
-    Names are derived by regex from the `text` column; the winner per
-    employee is the variant that appears the most times.
+    """Map employee_number → most-common extracted name across the given
+    project(s). Names are derived by regex from the `text` column; the
+    winner per employee is the variant that appears the most times.
+    Accepts a single project id or a list — same employee in multiple
+    projects naturally gets more name evidence to vote on.
     """
+    ids = [project_ids] if isinstance(project_ids, int) else list(project_ids)
+    if not ids:
+        return {}
     rows = session.execute(
         select(Transaction.employee, Transaction.text)
         .where(
-            Transaction.project_id == project_id,
+            Transaction.project_id.in_(ids),
             Transaction.employee.isnot(None),
             Transaction.text.isnot(None),
         )
@@ -277,13 +282,20 @@ class PersonMonthGrid:
 
 
 def per_person_month(
-    session: Session, project: Project, year: int
+    session: Session,
+    project_ids: int | list[int],
+    year: int,
 ) -> PersonMonthGrid:
     # Only include transactions with an employee number set. Transactions
     # without one (general overhead like software subscriptions, licences,
     # materials etc.) are categorically different and belong in the spending-
     # by-category view, not in a per-person grid where they would silently
     # land in a misleading "(no employee)" row.
+    ids = [project_ids] if isinstance(project_ids, int) else list(project_ids)
+    if not ids:
+        return PersonMonthGrid(
+            employees=[], totals_by_emp={}, grid={}, names={}
+        )
     rows = session.execute(
         select(
             Transaction.employee.label("emp"),
@@ -291,7 +303,7 @@ def per_person_month(
             func.sum(Transaction.amount).label("amt"),
         )
         .where(
-            Transaction.project_id == project.id,
+            Transaction.project_id.in_(ids),
             Transaction.employee.isnot(None),
             func.extract("year", Transaction.posting_date) == year,
         )
@@ -306,7 +318,7 @@ def per_person_month(
 
     # Sort by absolute total desc so largest spenders top the list.
     employees = sorted(totals.keys(), key=lambda e: abs(totals[e]), reverse=True)
-    names = build_employee_name_map(session, project.id)
+    names = build_employee_name_map(session, ids)
     return PersonMonthGrid(
         employees=employees,
         totals_by_emp=totals,

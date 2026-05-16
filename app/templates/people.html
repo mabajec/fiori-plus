@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}People — Fiori{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold mb-1">People</h1>
+  <p class="text-sm text-slate-500 dark:text-slate-400">
+    Spend per employee per month across the projects you select.
+  </p>
+</div>
+
+<form id="people-filters"
+      hx-get="/people"
+      hx-target="#results"
+      hx-push-url="true"
+      hx-trigger="change"
+      class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 mb-4">
+  <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-4 items-start">
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Projects</label>
+      <div class="flex flex-wrap gap-2">
+        {% for p in all_projects %}
+          {# Tailwind's peer pattern: the hidden input drives the visible
+             span's styling via peer-checked:. Updates immediately on click,
+             before any server round-trip. #}
+          <label class="cursor-pointer">
+            <input type="checkbox" name="project_id" value="{{ p.id }}" {% if p.id in selected_project_ids %}checked{% endif %} class="peer sr-only">
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors
+                         bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600
+                         peer-checked:bg-indigo-600 peer-checked:border-indigo-600 peer-checked:text-white peer-checked:hover:bg-indigo-700">
+              <span class="font-medium">{{ p.name }}</span>
+              <span class="opacity-60 font-mono">{{ p.pps_element }}</span>
+            </span>
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Year</label>
+      <select name="year"
+              class="px-2 py-1.5 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        {% for y in available_years %}
+          <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}</option>
+        {% else %}
+          <option value="">— no data —</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+</form>
+
+<div id="results">
+  {% include "_people_results.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,45 @@
+{# Drill-down for one (employee, month) cell in the cross-project people grid.
+   Same shape as _cell_expansion but with a Project column since rows can
+   come from any of the selected projects. #}
+<td colspan="14" class="px-4 py-3 bg-slate-50 dark:bg-slate-900/40 border-b border-slate-200 dark:border-slate-700">
+  <div class="flex items-center justify-between mb-2">
+    <div class="text-xs text-slate-600 dark:text-slate-300">
+      <span class="font-medium">{{ heading }}</span>
+      <span class="text-slate-400 dark:text-slate-500"> — {{ txns|length }} transaction{{ '' if txns|length == 1 else 's' }}, total € {{ total | slo_money }}</span>
+    </div>
+    <button type="button" onclick="this.closest('tr').innerHTML=''"
+            class="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+            aria-label="Close">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+      </svg>
+    </button>
+  </div>
+  <table class="w-full text-xs">
+    <thead>
+      <tr class="text-left text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
+        <th class="py-1 pr-2 font-medium">Date</th>
+        <th class="py-1 pr-2 font-medium">Project</th>
+        <th class="py-1 pr-2 font-medium">Doc #</th>
+        <th class="py-1 pr-2 font-medium">Account</th>
+        <th class="py-1 pr-2 font-medium">Text</th>
+        <th class="py-1 pl-2 font-medium text-right">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t, proj_name, proj_pps in rows %}
+        <tr>
+          <td class="py-1 pr-2 tabular-nums whitespace-nowrap">{{ t.posting_date.strftime('%Y-%m-%d') }}</td>
+          <td class="py-1 pr-2">
+            <a href="/projects/{{ t.project_id }}" class="text-indigo-600 dark:text-indigo-400 hover:underline">{{ proj_name }}</a>
+            <span class="text-slate-400 dark:text-slate-500">({{ proj_pps }})</span>
+          </td>
+          <td class="py-1 pr-2 tabular-nums">{{ t.document_number }}</td>
+          <td class="py-1 pr-2"><span class="tabular-nums">{{ t.account_code }}</span> <span class="text-slate-400 dark:text-slate-500">{{ t.account_text or '' }}</span></td>
+          <td class="py-1 pr-2 text-slate-600 dark:text-slate-300">{{ t.text or '' }}</td>
+          <td class="py-1 pl-2 text-right tabular-nums {% if t.amount < 0 %}text-red-600 dark:text-red-400{% endif %}">{{ t.amount | slo_money }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</td>

@@ -1183,7 +1183,7 @@ def project_detail(
         # template renders consistently when toggling years.
         summary.ytd_spent = ytd_for_year
 
-        grid = per_person_month(session, project, selected_year)
+        grid = per_person_month(session, project.id, selected_year)
 
         from app.analytics import monthly_totals
         monthly = monthly_totals(session, project, selected_year)
@@ -1700,4 +1700,133 @@ def unshare_project(
         session.commit()
     return RedirectResponse(
         f"/projects/{project_id}/settings?saved=1", status_code=303
+    )
+
+
+# ---------------------------------------------------------------------------
+# /people — cross-project per-person × month grid
+# ---------------------------------------------------------------------------
+
+
+from fastapi import Query  # local-style import to keep changes scoped
+
+
+@app.get("/people", response_class=HTMLResponse)
+def people_page(
+    request: Request,
+    project_id: list[int] = Query(default=None),
+    year: Optional[int] = None,
+) -> HTMLResponse:
+    from app.analytics import MONTHS_SHORT, per_person_month
+
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        all_projects = _accessible_projects(session, user.id)
+        accessible_ids = [p.id for p in all_projects]
+
+        # Default to all accessible when nothing is selected.
+        if project_id is None:
+            selected_ids = list(accessible_ids)
+        else:
+            # Drop any IDs the user doesn't actually have access to.
+            selected_ids = [i for i in project_id if i in accessible_ids]
+
+        # Years that have data anywhere in the user's accessible projects.
+        if accessible_ids:
+            available_years = sorted(
+                {
+                    int(y)
+                    for y in session.scalars(
+                        select(
+                            func.distinct(
+                                func.extract("year", Transaction.posting_date)
+                            )
+                        )
+                        .where(Transaction.project_id.in_(accessible_ids))
+                    )
+                    if y is not None
+                },
+                reverse=True,
+            )
+        else:
+            available_years = []
+
+        if year not in available_years:
+            year = available_years[0] if available_years else None
+
+        grid = (
+            per_person_month(session, selected_ids, year)
+            if year is not None and selected_ids
+            else None
+        )
+
+    context = {
+        "all_projects": all_projects,
+        "selected_project_ids": selected_ids,
+        "available_years": available_years,
+        "year": year,
+        "grid": grid,
+        "month_names": MONTHS_SHORT if grid is not None else [],
+    }
+    template = (
+        "_people_results.html"
+        if request.headers.get("HX-Request")
+        else "people.html"
+    )
+    return templates.TemplateResponse(request, template, context)
+
+
+@app.get("/people/cell", response_class=HTMLResponse)
+def people_cell(
+    request: Request,
+    year: int,
+    month: int,
+    employee: str,
+    project_id: list[int] = Query(default=None),
+) -> HTMLResponse:
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="month must be 1..12")
+
+    from app.analytics import MONTHS_SHORT, build_employee_name_map
+
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        accessible_ids = _accessible_project_ids(session, user.id)
+        # Intersect requested ids with accessibility — defence against URL fiddling.
+        selected_ids = [i for i in (project_id or []) if i in accessible_ids]
+        if not selected_ids:
+            raise HTTPException(status_code=400, detail="no projects selected")
+
+        rows = list(
+            session.execute(
+                select(Transaction, Project.name, Project.pps_element)
+                .join(Project, Project.id == Transaction.project_id)
+                .where(
+                    Transaction.project_id.in_(selected_ids),
+                    Transaction.employee == employee,
+                    func.extract("year", Transaction.posting_date) == year,
+                    func.extract("month", Transaction.posting_date) == month,
+                )
+                .order_by(Transaction.posting_date, Transaction.id)
+            ).all()
+        )
+        names = build_employee_name_map(session, selected_ids)
+
+    total = sum((t.amount for t, _, _ in rows), start=Decimal("0"))
+    name_part = (
+        f"{names[employee]} ({employee})"
+        if employee in names
+        else f"employee {employee}"
+    )
+    heading = f"{MONTHS_SHORT[month - 1]} {year} — {name_part}"
+
+    return templates.TemplateResponse(
+        request,
+        "_people_cell_expansion.html",
+        {
+            "rows": rows,
+            "txns": [t for t, _, _ in rows],
+            "total": total,
+            "heading": heading,
+        },
     )
