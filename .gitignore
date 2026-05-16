@@ -1,11 +1,17 @@
 # macOS
 .DS_Store
 
-# Python virtual environment
+# Python
 venv/
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
+
+# Local config
+.env
+.env.local
 
 # Data — never commit; may contain sensitive payroll info
 inputs/
