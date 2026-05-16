@@ -154,6 +154,58 @@
   </div>
 </form>
 
+{# ───── Sharing — separate form so it doesn't interact with Save all ───── #}
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 mt-6">
+  <h2 class="text-base font-semibold mb-3">Sharing</h2>
+  <div class="text-sm text-slate-600 dark:text-slate-300 mb-3">
+    Owned by <strong>{{ owner_email }}</strong>{% if owner_email and not is_owner %} <span class="text-xs text-slate-400 dark:text-slate-500">(that's not you — you're a shared collaborator)</span>{% endif %}.
+  </div>
+  {% if shares %}
+    <ul class="space-y-1.5 mb-3">
+      {% for s in shares %}
+        <li class="flex items-center justify-between text-sm py-1.5 px-2 rounded hover:bg-slate-50 dark:hover:bg-slate-700/40">
+          <span>
+            <span class="font-medium">{{ s.email }}</span>{% if s.name %} <span class="text-slate-400 dark:text-slate-500">({{ s.name }})</span>{% endif %}{% if s.is_me %} <span class="text-xs text-slate-400 dark:text-slate-500">(you)</span>{% endif %}
+            <span class="text-xs text-slate-400 dark:text-slate-500 ml-2">since {{ s.granted_at.strftime('%Y-%m-%d') }}</span>
+          </span>
+          {% if is_owner %}
+            <form method="post" action="/projects/{{ project.id }}/unshare" class="m-0">
+              <input type="hidden" name="user_id" value="{{ s.user_id }}">
+              <button type="submit"
+                      onclick="event.preventDefault(); askConfirm(this, 'Stop sharing with {{ s.email }}?', 'They will lose access to this project on their next request.');"
+                      class="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                      aria-label="Revoke share">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </form>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="text-sm text-slate-500 dark:text-slate-400 mb-3">Not shared with anyone yet.</p>
+  {% endif %}
+  {% if is_owner %}
+    <form method="post" action="/projects/{{ project.id }}/share" class="flex gap-2">
+      <input type="email" name="email" required placeholder="user@example.com"
+             class="flex-1 px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <button type="submit"
+              class="px-4 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-sm font-medium rounded-lg transition-colors whitespace-nowrap">
+        Share with user
+      </button>
+    </form>
+    <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">
+      The other user must already exist in the system. Use <code class="bg-slate-100 dark:bg-slate-900 px-1 rounded">fiori user create</code> to add them.
+    </p>
+  {% else %}
+    <p class="text-xs text-slate-500 dark:text-slate-400">
+      Only the project owner can manage sharing.
+    </p>
+  {% endif %}
+</section>
+
 {# ───── Confirm dialog (styled replacement for window.confirm) ───── #}
 <dialog id="confirm-dialog"
         class="rounded-xl backdrop:bg-slate-900/60 dark:backdrop:bg-black/70 p-0 max-w-md w-full bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 shadow-2xl">

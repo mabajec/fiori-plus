@@ -24,6 +24,7 @@ from app.models import (
     Project,
     ProjectAnnualData,
     ProjectBudgetLine,
+    ProjectShare,
     Transaction,
     User,
 )
@@ -329,12 +330,58 @@ class _NeedsName(Exception):
 
 
 def _accessible_project_ids(session: Session, user_id: int) -> list[int]:
-    # Phase 2b: only own projects. ProjectShare will widen this later.
+    """Projects this user can see — owned plus any shared with them."""
     return list(
         session.scalars(
-            select(Project.id).where(Project.owner_user_id == user_id)
+            select(Project.id)
+            .outerjoin(
+                ProjectShare, ProjectShare.project_id == Project.id
+            )
+            .where(
+                or_(
+                    Project.owner_user_id == user_id,
+                    ProjectShare.user_id == user_id,
+                )
+            )
+            .distinct()
         )
     )
+
+
+def _accessible_projects(session: Session, user_id: int) -> list[Project]:
+    """List of accessible Project objects, ordered by name."""
+    ids = _accessible_project_ids(session, user_id)
+    if not ids:
+        return []
+    return list(
+        session.scalars(
+            select(Project).where(Project.id.in_(ids)).order_by(Project.name)
+        )
+    )
+
+
+def _load_accessible_project(
+    session: Session, user_id: int, project_id: int
+) -> Project:
+    """Load one project the user can access. 404 otherwise."""
+    project = session.get(Project, project_id)
+    if project is None or project.id not in _accessible_project_ids(
+        session, user_id
+    ):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+def _is_owner(project: Project, user: User) -> bool:
+    return project.owner_user_id == user.id
+
+
+def _require_owner(project: Project, user: User) -> None:
+    if not _is_owner(project, user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the project owner can do this.",
+        )
 
 
 def _parse_iso_date(s: str | None) -> date | None:
@@ -448,13 +495,7 @@ def transactions_page(
         )
         rows = [(_txn_view(tr), proj) for tr, proj in session.execute(rows_q).all()]
 
-        projects = list(
-            session.scalars(
-                select(Project)
-                .where(Project.owner_user_id == user.id)
-                .order_by(Project.name)
-            )
-        )
+        projects = _accessible_projects(session, user.id)
         sources = list(
             session.scalars(
                 select(Transaction.source)
@@ -745,13 +786,7 @@ def projects_list(request: Request) -> HTMLResponse:
 
     with SessionLocal() as session:
         user = _current_user(session, request)
-        projects = list(
-            session.scalars(
-                select(Project)
-                .where(Project.owner_user_id == user.id)
-                .order_by(Project.name)
-            )
-        )
+        projects = _accessible_projects(session, user.id)
         cards = []
         for p in projects:
             summary = project_summary(session, p)
@@ -838,13 +873,7 @@ def _load_project_for_settings(session: Session, user_id: int, project_id: int):
     """
     from app.models import ProjectAnnualData  # local import to avoid cycle
 
-    project = session.scalar(
-        select(Project).where(
-            Project.id == project_id, Project.owner_user_id == user_id
-        )
-    )
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = _load_accessible_project(session, user_id, project_id)
 
     existing_years = {ad.year for ad in project.annual_data}
     txn_years = set(
@@ -869,9 +898,23 @@ def project_settings(request: Request, project_id: int, saved: int = 0, error: s
     with SessionLocal() as session:
         user = _current_user(session, request)
         project, annual_views = _load_project_for_settings(session, user.id, project_id)
-        # We need the annual_views attached for the template loop. Re-render
-        # project's annual_data as views, since template iterates project.annual_data.
-        # Simplest path: just pass annual_views as the iterable.
+        owner = session.get(User, project.owner_user_id)
+        share_rows = session.execute(
+            select(ProjectShare, User)
+            .join(User, User.id == ProjectShare.user_id)
+            .where(ProjectShare.project_id == project.id)
+            .order_by(User.email)
+        ).all()
+        shares = [
+            {
+                "user_id": u.id,
+                "email": u.email,
+                "name": u.name,
+                "granted_at": share.granted_at,
+                "is_me": u.id == user.id,
+            }
+            for share, u in share_rows
+        ]
         return templates.TemplateResponse(
             request,
             "project_settings.html",
@@ -883,6 +926,10 @@ def project_settings(request: Request, project_id: int, saved: int = 0, error: s
                     description=project.description,
                     annual_data=annual_views,
                 ),
+                "is_owner": _is_owner(project, user),
+                "owner_email": owner.email if owner else None,
+                "owner_name": owner.name if owner else None,
+                "shares": shares,
                 "saved": bool(saved),
                 "error": error or None,
             },
@@ -909,13 +956,7 @@ async def save_project_settings(request: Request, project_id: int) -> HTMLRespon
 
     with SessionLocal() as session:
         user = _current_user(session, request)
-        project = session.scalar(
-            select(Project).where(
-                Project.id == project_id, Project.owner_user_id == user.id
-            )
-        )
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
+        project = _load_accessible_project(session, user.id, project_id)
 
         # ── action: delete a year ──────────────────────────────────────────
         if delete_year:
@@ -1077,13 +1118,7 @@ def project_detail(
 
     with SessionLocal() as session:
         user = _current_user(session, request)
-        project = session.scalar(
-            select(Project).where(
-                Project.id == project_id, Project.owner_user_id == user.id
-            )
-        )
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
+        project = _load_accessible_project(session, user.id, project_id)
 
         summary = project_summary(session, project)
         available_years = _all_years_for_project(session, project.id)
@@ -1208,13 +1243,7 @@ def cell_expansion(
 
     with SessionLocal() as session:
         user = _current_user(session, request)
-        project = session.scalar(
-            select(Project).where(
-                Project.id == project_id, Project.owner_user_id == user.id
-            )
-        )
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
+        project = _load_accessible_project(session, user.id, project_id)
 
         where_clauses = [
             Transaction.project_id == project.id,
@@ -1272,13 +1301,7 @@ def category_transactions(
 
     with SessionLocal() as session:
         user = _current_user(session, request)
-        project = session.scalar(
-            select(Project).where(
-                Project.id == project_id, Project.owner_user_id == user.id
-            )
-        )
-        if project is None:
-            raise HTTPException(status_code=404, detail="Project not found")
+        project = _load_accessible_project(session, user.id, project_id)
 
         # Pull all budget-line prefixes for this project+year (for OTHER, and
         # for the "exclude longer prefixes" trick on a specific line).
@@ -1604,3 +1627,77 @@ def profile_change_password(
         user.force_password_change = False
         session.commit()
     return RedirectResponse("/profile?saved=1", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Project sharing — grant / revoke read+edit access for another user
+# ---------------------------------------------------------------------------
+
+
+@app.post("/projects/{project_id}/share")
+def share_project(
+    request: Request,
+    project_id: int,
+    email: str = Form(...),
+) -> RedirectResponse:
+    from urllib.parse import quote
+
+    email = email.strip().lower()
+    with SessionLocal() as session:
+        actor = _current_user(session, request)
+        project = _load_accessible_project(session, actor.id, project_id)
+        _require_owner(project, actor)  # only the owner can grant access
+
+        target = session.scalar(select(User).where(User.email == email))
+        if target is None:
+            return RedirectResponse(
+                f"/projects/{project_id}/settings"
+                f"?error={quote('No user with that email. Create them with fiori user create first.')}",
+                status_code=303,
+            )
+        if target.id == actor.id:
+            return RedirectResponse(
+                f"/projects/{project_id}/settings"
+                f"?error={quote('You already own this project; no need to share with yourself.')}",
+                status_code=303,
+            )
+        existing = session.scalar(
+            select(ProjectShare).where(
+                ProjectShare.project_id == project.id,
+                ProjectShare.user_id == target.id,
+            )
+        )
+        if existing is None:
+            session.add(
+                ProjectShare(
+                    project_id=project.id,
+                    user_id=target.id,
+                    granted_by=actor.id,
+                )
+            )
+            session.commit()
+    return RedirectResponse(
+        f"/projects/{project_id}/settings?saved=1", status_code=303
+    )
+
+
+@app.post("/projects/{project_id}/unshare")
+def unshare_project(
+    request: Request,
+    project_id: int,
+    user_id: int = Form(...),
+) -> RedirectResponse:
+    with SessionLocal() as session:
+        actor = _current_user(session, request)
+        project = _load_accessible_project(session, actor.id, project_id)
+        _require_owner(project, actor)
+        session.execute(
+            ProjectShare.__table__.delete().where(
+                ProjectShare.project_id == project.id,
+                ProjectShare.user_id == user_id,
+            )
+        )
+        session.commit()
+    return RedirectResponse(
+        f"/projects/{project_id}/settings?saved=1", status_code=303
+    )
