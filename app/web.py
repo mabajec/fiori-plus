@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -75,6 +76,11 @@ class FileEntry:
 
 
 app = FastAPI(title="Fiori")
+app.mount(
+    "/static",
+    StaticFiles(directory=Path(__file__).parent / "static"),
+    name="static",
+)
 
 
 # Paths that don't require a logged-in session. Everything else is gated.

@@ -1,0 +1,50 @@
+# Production compose: Postgres + the Fiori web app on a single host.
+#
+# Usage:
+#   cp .env.prod.example .env.prod   # then edit secrets
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod exec app alembic upgrade head
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod exec app fiori init
+#
+# The app is exposed on ${APP_PORT} (default 8000) on the host. A reverse
+# proxy (Traefik, in this deployment) can later proxy a real domain to it
+# and terminate TLS — see DEPLOY.md.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fiori}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: ${POSTGRES_DB:-fiori}
+    # No host port mapping — db is only reachable from the app container.
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fiori} -d ${POSTGRES_DB:-fiori}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fiori}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-fiori}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env.prod}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
+      INPUTS_DIR: /app/inputs
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@local}
+      DEFAULT_ADMIN_NAME: ${DEFAULT_ADMIN_NAME:-Admin}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # TSV exports the admin scp's onto the host land here.
+      - ${HOST_INPUTS_DIR:?set HOST_INPUTS_DIR in .env.prod}:/app/inputs:ro
+
+volumes:
+  db_data:

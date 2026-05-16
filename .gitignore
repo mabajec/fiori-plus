@@ -12,6 +12,7 @@ __pycache__/
 # Local config
 .env
 .env.local
+.env.prod
 
 # Data — never commit; may contain sensitive payroll info
 inputs/
