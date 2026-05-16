@@ -273,12 +273,28 @@ def monthly_totals(
     return result
 
 
+STUDENT_PREFIX = "STU:"  # sentinel used to distinguish student row keys
+                         # from employee numbers in the grid maps.
+
+
+def _extract_student_name(text: str | None) -> str | None:
+    """Pull the student name from a 'ŠS <name>' text field. Returns None
+    if the text isn't in the student-services format."""
+    if not text:
+        return None
+    if not text.startswith("ŠS "):
+        return None
+    name = text[3:].strip()
+    return name or None
+
+
 @dataclass
 class PersonMonthGrid:
-    employees: list[str]                # display order; "" used for null employee
-    totals_by_emp: dict[str, Decimal]   # full year sum per employee
-    grid: dict[str, dict[int, Decimal]] # emp → {month_int 1-12: sum}
-    names: dict[str, str]               # employee_number → display name (when known)
+    employees: list[str]                # display order; row keys (employee_number or "STU:name")
+    totals_by_emp: dict[str, Decimal]   # full-year sum per row
+    grid: dict[str, dict[int, Decimal]] # row key → {month_int 1-12: sum}
+    names: dict[str, str]               # row key → display name
+    is_student: dict[str, bool]         # row key → True when this is a student row
 
 
 def per_person_month(
@@ -286,17 +302,32 @@ def per_person_month(
     project_ids: int | list[int],
     year: int,
 ) -> PersonMonthGrid:
-    # Only include transactions with an employee number set. Transactions
-    # without one (general overhead like software subscriptions, licences,
-    # materials etc.) are categorically different and belong in the spending-
-    # by-category view, not in a per-person grid where they would silently
-    # land in a misleading "(no employee)" row.
+    """Aggregate spending per person per month.
+
+    Two flavours of "person" land in the grid:
+      - Employees, identified by their KadrŠt number.
+      - Students, identified by the name extracted from a `ŠS <name>` text
+        field on transactions that have no employee number. Student rows
+        use a "STU:<name>" sentinel key so they don't collide with
+        numeric employee keys in the dicts.
+
+    Other no-employee transactions (overhead, materials, subscriptions)
+    are deliberately excluded — they belong in the spending-by-category
+    view, not in a per-person grid.
+    """
     ids = [project_ids] if isinstance(project_ids, int) else list(project_ids)
     if not ids:
         return PersonMonthGrid(
-            employees=[], totals_by_emp={}, grid={}, names={}
+            employees=[], totals_by_emp={}, grid={}, names={}, is_student={}
         )
-    rows = session.execute(
+
+    grid: dict[str, dict[int, Decimal]] = {}
+    totals: dict[str, Decimal] = {}
+    names: dict[str, str] = {}
+    is_student: dict[str, bool] = {}
+
+    # ── Employees ──────────────────────────────────────────────────────
+    employee_rows = session.execute(
         select(
             Transaction.employee.label("emp"),
             func.extract("month", Transaction.posting_date).label("mo"),
@@ -309,19 +340,46 @@ def per_person_month(
         )
         .group_by("emp", "mo")
     ).all()
-
-    grid: dict[str, dict[int, Decimal]] = {}
-    totals: dict[str, Decimal] = {}
-    for emp, mo, amt in rows:
+    for emp, mo, amt in employee_rows:
         grid.setdefault(emp, {})[int(mo)] = amt
         totals[emp] = totals.get(emp, Decimal(0)) + amt
+    names.update(build_employee_name_map(session, ids))
 
-    # Sort by absolute total desc so largest spenders top the list.
-    employees = sorted(totals.keys(), key=lambda e: abs(totals[e]), reverse=True)
-    names = build_employee_name_map(session, ids)
+    # ── Students ───────────────────────────────────────────────────────
+    # Group is done in Python because extracting the name from the text
+    # column needs a regex/strip that doesn't fit cleanly into a GROUP BY.
+    student_rows = session.execute(
+        select(
+            Transaction.text,
+            func.extract("month", Transaction.posting_date).label("mo"),
+            Transaction.amount,
+        )
+        .where(
+            Transaction.project_id.in_(ids),
+            Transaction.employee.is_(None),
+            Transaction.text.like("ŠS %"),
+            func.extract("year", Transaction.posting_date) == year,
+        )
+    ).all()
+    for text, mo, amt in student_rows:
+        name = _extract_student_name(text)
+        if not name:
+            continue
+        key = f"{STUDENT_PREFIX}{name}"
+        mo_int = int(mo)
+        bucket = grid.setdefault(key, {})
+        bucket[mo_int] = bucket.get(mo_int, Decimal(0)) + amt
+        totals[key] = totals.get(key, Decimal(0)) + amt
+        names[key] = name
+        is_student[key] = True
+
+    # Alphabetical by display name. Predictable; total is in its own column
+    # for anyone who wants to eyeball biggest-spender ordering.
+    employees = sorted(totals.keys(), key=lambda e: (names.get(e, e) or e).lower())
     return PersonMonthGrid(
         employees=employees,
         totals_by_emp=totals,
         grid=grid,
         names=names,
+        is_student=is_student,
     )

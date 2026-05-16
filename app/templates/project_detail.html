@@ -199,7 +199,8 @@
   <div class="px-5 py-3 border-b border-slate-200 dark:border-slate-700">
     <h2 class="text-base font-semibold">Spending by person and month</h2>
     <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-      Only transactions tagged with an employee number. Click any cell to see them.
+      Employees (tagged with KadrŠt) and students (from <code>ŠS …</code> text).
+      Click any cell to see the underlying transactions.
     </p>
   </div>
   <div class="overflow-x-auto">
@@ -216,9 +217,24 @@
       <tbody>
         {% for emp in grid.employees %}
           {% set emp_idx = loop.index0 %}
-          <tr class="border-b border-slate-100 dark:border-slate-700">
+          {% set is_stu = grid.is_student.get(emp, False) %}
+          {# Person query fragment for the cell URL — student name vs employee number. #}
+          {% if is_stu %}
+            {% set person_param = 'student=' + (grid.names[emp]|urlencode) %}
+          {% else %}
+            {% set person_param = 'employee=' + (emp|urlencode) %}
+          {% endif %}
+          <tr class="border-b border-slate-100 dark:border-slate-700 {% if is_stu %}bg-amber-50/60 dark:bg-amber-900/10{% endif %}">
             <td class="px-3 py-2 whitespace-nowrap">
-              {% if grid.names.get(emp) %}
+              {% if is_stu %}
+                <div class="flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0" aria-label="student">
+                    <title>student</title>
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.26 10.147a60.438 60.438 0 0 0-.491 6.347A48.62 48.62 0 0 1 12 20.904a48.62 48.62 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a50.636 50.636 0 0 0-2.658-.813A59.906 59.906 0 0 1 12 3.493a59.903 59.903 0 0 1 10.399 5.84c-.896.248-1.783.52-2.658.814m-15.482 0A50.717 50.717 0 0 1 12 13.489a50.702 50.702 0 0 1 7.74-3.342M6.75 15a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm0 0v-3.675A55.378 55.378 0 0 1 12 8.443m-7.007 11.55A5.981 5.981 0 0 0 6.75 15.75v-1.5" />
+                  </svg>
+                  <span class="font-medium">{{ grid.names[emp] }}</span>
+                </div>
+              {% elif grid.names.get(emp) %}
                 <div class="font-medium">{{ grid.names[emp] }}</div>
                 <div class="text-xs text-slate-400 dark:text-slate-500 tabular-nums">{{ emp }}</div>
               {% else %}
@@ -230,7 +246,7 @@
               <td class="px-2 py-2 text-right tabular-nums">
                 {% if amt is not none %}
                   <button type="button"
-                          hx-get="/projects/{{ project.id }}/cell?year={{ year }}&month={{ m }}&employee={{ emp|urlencode }}"
+                          hx-get="/projects/{{ project.id }}/cell?year={{ year }}&month={{ m }}&{{ person_param }}"
                           hx-target="#exp-{{ emp_idx }}"
                           hx-swap="innerHTML"
                           class="hover:underline cursor-pointer {% if amt < 0 %}text-red-600 dark:text-red-400{% endif %}">

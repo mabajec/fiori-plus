@@ -1237,9 +1237,12 @@ def cell_expansion(
     year: int,
     month: int,
     employee: str = "",
+    student: str = "",
 ) -> HTMLResponse:
     if not (1 <= month <= 12):
         raise HTTPException(status_code=400, detail="month must be 1..12")
+
+    from app.analytics import MONTHS_SHORT, build_employee_name_map, _extract_student_name
 
     with SessionLocal() as session:
         user = _current_user(session, request)
@@ -1250,27 +1253,39 @@ def cell_expansion(
             func.extract("year", Transaction.posting_date) == year,
             func.extract("month", Transaction.posting_date) == month,
         ]
-        if employee:
+        if student:
+            # Student rows: employee is null, text is "ŠS <student>".
+            where_clauses.append(Transaction.employee.is_(None))
+            where_clauses.append(Transaction.text.like("ŠS %"))
+        elif employee:
             where_clauses.append(Transaction.employee == employee)
         else:
             where_clauses.append(Transaction.employee.is_(None))
 
-        txns = list(
+        candidates = list(
             session.scalars(
                 select(Transaction)
                 .where(*where_clauses)
                 .order_by(Transaction.posting_date, Transaction.id)
             )
         )
+        # For student requests the SQL filter matches any ŠS row; pin it
+        # down to the exact student name in Python (regex-via-strip).
+        if student:
+            txns = [t for t in candidates if _extract_student_name(t.text) == student]
+        else:
+            txns = candidates
 
-    from app.analytics import MONTHS_SHORT, build_employee_name_map
+        names = build_employee_name_map(session, project_id) if employee else {}
 
     total = sum((t.amount for t in txns), start=Decimal("0"))
-    if employee:
-        with SessionLocal() as session:
-            names = build_employee_name_map(session, project_id)
+    if student:
+        display = f"{student} (student)"
+    elif employee:
         display = (
-            f"{names[employee]} ({employee})" if employee in names else f"employee {employee}"
+            f"{names[employee]} ({employee})"
+            if employee in names
+            else f"employee {employee}"
         )
     else:
         display = "(no employee)"
@@ -1781,43 +1796,58 @@ def people_cell(
     request: Request,
     year: int,
     month: int,
-    employee: str,
+    employee: str = "",
+    student: str = "",
     project_id: list[int] = Query(default=None),
 ) -> HTMLResponse:
     if not (1 <= month <= 12):
         raise HTTPException(status_code=400, detail="month must be 1..12")
+    if not employee and not student:
+        raise HTTPException(status_code=400, detail="employee or student required")
 
-    from app.analytics import MONTHS_SHORT, build_employee_name_map
+    from app.analytics import MONTHS_SHORT, build_employee_name_map, _extract_student_name
 
     with SessionLocal() as session:
         user = _current_user(session, request)
         accessible_ids = _accessible_project_ids(session, user.id)
-        # Intersect requested ids with accessibility — defence against URL fiddling.
         selected_ids = [i for i in (project_id or []) if i in accessible_ids]
         if not selected_ids:
             raise HTTPException(status_code=400, detail="no projects selected")
+
+        base_where = [
+            Transaction.project_id.in_(selected_ids),
+            func.extract("year", Transaction.posting_date) == year,
+            func.extract("month", Transaction.posting_date) == month,
+        ]
+        if student:
+            base_where.append(Transaction.employee.is_(None))
+            base_where.append(Transaction.text.like("ŠS %"))
+        else:
+            base_where.append(Transaction.employee == employee)
 
         rows = list(
             session.execute(
                 select(Transaction, Project.name, Project.pps_element)
                 .join(Project, Project.id == Transaction.project_id)
-                .where(
-                    Transaction.project_id.in_(selected_ids),
-                    Transaction.employee == employee,
-                    func.extract("year", Transaction.posting_date) == year,
-                    func.extract("month", Transaction.posting_date) == month,
-                )
+                .where(*base_where)
                 .order_by(Transaction.posting_date, Transaction.id)
             ).all()
         )
-        names = build_employee_name_map(session, selected_ids)
+        if student:
+            rows = [
+                r for r in rows if _extract_student_name(r[0].text) == student
+            ]
+        names = build_employee_name_map(session, selected_ids) if employee else {}
 
     total = sum((t.amount for t, _, _ in rows), start=Decimal("0"))
-    name_part = (
-        f"{names[employee]} ({employee})"
-        if employee in names
-        else f"employee {employee}"
-    )
+    if student:
+        name_part = f"{student} (student)"
+    else:
+        name_part = (
+            f"{names[employee]} ({employee})"
+            if employee in names
+            else f"employee {employee}"
+        )
     heading = f"{MONTHS_SHORT[month - 1]} {year} — {name_part}"
 
     return templates.TemplateResponse(
