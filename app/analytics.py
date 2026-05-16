@@ -73,10 +73,11 @@ class ProjectSummary:
     ytd_spent: Decimal                    # sum in latest_year (0 if no data)
     all_time_spent: Decimal
     last_txn_date: Optional[date]
-    days_in_year: int                     # 365 or 366
+    days_in_period: int                   # days in the projection period (clamped by project dates)
     days_elapsed: int                     # 0 when no data
-    projection: Optional[Decimal]         # None when no data; ytd × days_in_year / days_elapsed
+    projection: Optional[Decimal]         # None when no data; ytd × days_in_period / days_elapsed
     annual: Optional[ProjectAnnualData]   # the row for latest_year, or None
+    period_end: Optional[date]            # effective end of the projection period
 
 
 def project_summary(session: Session, project: Project) -> ProjectSummary:
@@ -96,10 +97,11 @@ def project_summary(session: Session, project: Project) -> ProjectSummary:
             ytd_spent=Decimal(0),
             all_time_spent=all_time,
             last_txn_date=None,
-            days_in_year=365,
+            days_in_period=365,
             days_elapsed=0,
             projection=None,
             annual=None,
+            period_end=None,
         )
 
     latest_year = int(latest_year_raw)
@@ -115,16 +117,15 @@ def project_summary(session: Session, project: Project) -> ProjectSummary:
         .where(Transaction.project_id == project.id)
     )
 
-    days_in_year = 366 if calendar.isleap(latest_year) else 365
-    if last_date and last_date.year == latest_year:
-        days_elapsed = (last_date - date(latest_year, 1, 1)).days + 1
-    else:
-        days_elapsed = days_in_year
+    days_elapsed, days_in_period = _year_progress(
+        session, project.id, latest_year, project
+    )
+    _, period_end = _period_bounds(latest_year, project)
 
     projection: Optional[Decimal] = None
     if days_elapsed > 0:
         projection = (
-            ytd * Decimal(days_in_year) / Decimal(days_elapsed)
+            ytd * Decimal(days_in_period) / Decimal(days_elapsed)
         ).quantize(Decimal("0.01"))
 
     annual = session.scalar(
@@ -140,10 +141,11 @@ def project_summary(session: Session, project: Project) -> ProjectSummary:
         ytd_spent=ytd,
         all_time_spent=all_time,
         last_txn_date=last_date,
-        days_in_year=days_in_year,
+        days_in_period=days_in_period,
         days_elapsed=days_elapsed,
         projection=projection,
         annual=annual,
+        period_end=period_end,
     )
 
 
@@ -160,10 +162,31 @@ class StructureRow:
     projected: Optional[Decimal]  # year-end projection; None when no activity yet
 
 
-def _year_progress(session: Session, project_id: int, year: int) -> tuple[int, int]:
-    """Return (days_elapsed, days_in_year) for this project's transactions in
-    `year`. days_elapsed is anchored to the latest transaction posting date
-    so the projection is consistent with project_summary."""
+def _period_bounds(year: int, project: Project | None) -> tuple[date, date]:
+    """Effective period for projection within `year`, clamped to the
+    project's lifetime when start_date / end_date are set. Defaults to
+    Jan 1 → Dec 31 of `year` if either bound is unset."""
+    period_start = date(year, 1, 1)
+    period_end = date(year, 12, 31)
+    if project is not None:
+        if project.start_date and project.start_date > period_start:
+            period_start = project.start_date
+        if project.end_date and project.end_date < period_end:
+            period_end = project.end_date
+    return period_start, period_end
+
+
+def _year_progress(
+    session: Session, project_id: int, year: int, project: Project | None = None
+) -> tuple[int, int]:
+    """Return (days_elapsed, days_in_period) for `year`.
+
+    days_in_period is clamped to the project's start/end dates when set
+    (so a project ending 31 Jul has days_in_period = 212, not 365).
+    days_elapsed is anchored to the latest transaction posting date,
+    counted from the period start so a mid-year project start still
+    yields an accurate burn rate.
+    """
     last_date = session.scalar(
         select(func.max(Transaction.posting_date))
         .where(
@@ -171,17 +194,18 @@ def _year_progress(session: Session, project_id: int, year: int) -> tuple[int, i
             func.extract("year", Transaction.posting_date) == year,
         )
     )
-    days_in_year = 366 if calendar.isleap(year) else 365
-    if last_date is None:
-        return 0, days_in_year
-    days_elapsed = (last_date - date(year, 1, 1)).days + 1
-    return days_elapsed, days_in_year
+    period_start, period_end = _period_bounds(year, project)
+    days_in_period = max(1, (period_end - period_start).days + 1)
+    if last_date is None or last_date < period_start:
+        return 0, days_in_period
+    days_elapsed = max(1, (last_date - period_start).days + 1)
+    return days_elapsed, days_in_period
 
 
-def _project(value: Decimal, days_elapsed: int, days_in_year: int) -> Optional[Decimal]:
+def _project(value: Decimal, days_elapsed: int, days_in_period: int) -> Optional[Decimal]:
     if days_elapsed <= 0:
         return None
-    return (value * Decimal(days_in_year) / Decimal(days_elapsed)).quantize(
+    return (value * Decimal(days_in_period) / Decimal(days_elapsed)).quantize(
         Decimal("0.01")
     )
 
@@ -225,7 +249,7 @@ def structure_breakdown(
         else:
             spent_by_id[match_id] += amount
 
-    days_elapsed, days_in_year = _year_progress(session, project.id, year)
+    days_elapsed, days_in_period = _year_progress(session, project.id, year, project)
 
     rows: list[StructureRow] = [
         StructureRow(
@@ -234,7 +258,7 @@ def structure_breakdown(
             account_prefix=line.account_prefix,
             budgeted=line.amount,
             spent=spent_by_id[line.id],
-            projected=_project(spent_by_id[line.id], days_elapsed, days_in_year),
+            projected=_project(spent_by_id[line.id], days_elapsed, days_in_period),
         )
         for line in lines
     ]
@@ -245,7 +269,7 @@ def structure_breakdown(
             account_prefix=None,
             budgeted=None,
             spent=other_spent,
-            projected=_project(other_spent, days_elapsed, days_in_year),
+            projected=_project(other_spent, days_elapsed, days_in_period),
         )
     )
     return rows

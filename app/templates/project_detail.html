@@ -48,7 +48,11 @@
       <div class="text-xl font-semibold tabular-nums {% if budget and summary.projection and summary.projection > budget %}text-red-600 dark:text-red-400{% endif %}">
         {% if summary.projection is not none %}€ {{ summary.projection | slo_money }}{% else %}—{% endif %}
       </div>
-      <div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{{ summary.days_elapsed }}/{{ summary.days_in_year }} days</div>
+      <div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+        {{ summary.days_elapsed }}/{{ summary.days_in_period }} days{% if summary.period_end and summary.period_end != date(year, 12, 31) %}
+          <span class="block">to {{ summary.period_end.strftime('%Y-%m-%d') }}</span>
+        {% endif %}
+      </div>
     </div>
     <div>
       <div class="text-xs text-slate-500 dark:text-slate-400">Budget</div>

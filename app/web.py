@@ -50,6 +50,7 @@ def _format_slo_money(value: Decimal | None) -> str:
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 templates.env.filters["slo_money"] = _format_slo_money
+templates.env.globals["date"] = date
 
 
 @dataclass
@@ -940,6 +941,8 @@ def project_settings(request: Request, project_id: int, saved: int = 0, error: s
                     name=project.name,
                     pps_element=project.pps_element,
                     description=project.description,
+                    start_date=project.start_date,
+                    end_date=project.end_date,
                     annual_data=annual_views,
                 ),
                 "is_owner": _is_owner(project, user),
@@ -959,6 +962,8 @@ class _ProjectSettingsView:
     name: str
     pps_element: str
     description: str | None
+    start_date: date | None
+    end_date: date | None
     annual_data: list[AnnualDataView]
 
 
@@ -1030,6 +1035,17 @@ async def save_project_settings(request: Request, project_id: int) -> HTMLRespon
                 raise ValueError("Project name cannot be empty.")
             project.name = new_name
             project.description = (form.get("description") or "").strip() or None
+
+            start_raw = (form.get("start_date") or "").strip()
+            end_raw = (form.get("end_date") or "").strip()
+            project.start_date = _parse_iso_date(start_raw) if start_raw else None
+            project.end_date = _parse_iso_date(end_raw) if end_raw else None
+            if (
+                project.start_date
+                and project.end_date
+                and project.start_date > project.end_date
+            ):
+                raise ValueError("Project start date is after end date.")
 
             # Parse form into { year: { total, starting, lines: [(idx, label, prefix, amount_str)] } }
             year_data: dict[int, dict] = {}
