@@ -23,7 +23,8 @@
       </div>
       <div class="flex items-center gap-4">
         <nav class="flex gap-6 text-sm">
-          <a href="/imports" class="text-indigo-600 dark:text-indigo-400 font-medium hover:text-indigo-700 dark:hover:text-indigo-300">Imports</a>
+          <a href="/transactions" class="text-slate-600 dark:text-slate-300 font-medium hover:text-indigo-600 dark:hover:text-indigo-400">Transactions</a>
+          <a href="/imports" class="text-slate-600 dark:text-slate-300 font-medium hover:text-indigo-600 dark:hover:text-indigo-400">Imports</a>
         </nav>
         <button onclick="toggleTheme()"
                 class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
@@ -39,9 +40,13 @@
     </div>
   </header>
 
-  <main class="max-w-5xl mx-auto px-6 py-8">
+  <main class="max-w-6xl mx-auto px-6 py-8">
     {% block content %}{% endblock %}
   </main>
+
+  {# Container for HTMX-loaded modals. Auto-opens any <dialog> swapped in. #}
+  <div id="modal-container"
+       hx-on::after-swap="this.querySelector('dialog')?.showModal()"></div>
 
   <script>
     function toggleTheme() {

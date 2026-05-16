@@ -1,0 +1,82 @@
+{# Swappable results region: table + totals + pager.
+   Rendered standalone for HTMX swaps, or included from transactions.html. #}
+<div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-slate-50 dark:bg-slate-900/50 border-b border-slate-200 dark:border-slate-700">
+        <tr class="text-left text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+          <th class="px-3 py-2 font-medium whitespace-nowrap">
+            <a hx-get="/transactions" hx-include="#filters"
+               hx-vals='{"sort": "posting_date", "dir": "{{ 'asc' if sort == 'posting_date' and dir == 'desc' else 'desc' }}", "page": "1"}'
+               hx-target="#results" hx-push-url="true"
+               class="cursor-pointer hover:text-indigo-600 dark:hover:text-indigo-400">
+              Date{% if sort == 'posting_date' %} {{ '↓' if dir == 'desc' else '↑' }}{% endif %}
+            </a>
+          </th>
+          <th class="px-3 py-2 font-medium">Project</th>
+          <th class="px-3 py-2 font-medium whitespace-nowrap">Doc #</th>
+          <th class="px-3 py-2 font-medium">
+            <a hx-get="/transactions" hx-include="#filters"
+               hx-vals='{"sort": "account_code", "dir": "{{ 'asc' if sort == 'account_code' and dir == 'desc' else 'desc' }}", "page": "1"}'
+               hx-target="#results" hx-push-url="true"
+               class="cursor-pointer hover:text-indigo-600 dark:hover:text-indigo-400">
+              Account{% if sort == 'account_code' %} {{ '↓' if dir == 'desc' else '↑' }}{% endif %}
+            </a>
+          </th>
+          <th class="px-3 py-2 font-medium text-right">
+            <a hx-get="/transactions" hx-include="#filters"
+               hx-vals='{"sort": "amount", "dir": "{{ 'asc' if sort == 'amount' and dir == 'desc' else 'desc' }}", "page": "1"}'
+               hx-target="#results" hx-push-url="true"
+               class="cursor-pointer hover:text-indigo-600 dark:hover:text-indigo-400">
+              Amount{% if sort == 'amount' %} {{ '↓' if dir == 'desc' else '↑' }}{% endif %}
+            </a>
+          </th>
+          <th class="px-3 py-2 font-medium">Employee</th>
+          <th class="px-3 py-2 font-medium">Text</th>
+          <th class="px-3 py-2 font-medium">Source</th>
+          <th class="px-3 py-2 font-medium text-right">&nbsp;</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for tr, proj in rows %}
+          {% include "_transaction_row.html" %}
+        {% else %}
+          <tr>
+            <td colspan="9" class="px-3 py-8 text-center text-slate-400 dark:text-slate-500 text-sm">
+              No transactions match the current filters.
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="bg-slate-50 dark:bg-slate-900/50 border-t border-slate-200 dark:border-slate-700 px-4 py-2.5 flex items-center justify-between text-sm">
+    <div class="text-slate-600 dark:text-slate-300">
+      <span class="font-medium">{{ total_count }}</span>
+      <span class="text-slate-400 dark:text-slate-500">{{ 'row' if total_count == 1 else 'rows' }} matching · total</span>
+      <span class="font-medium tabular-nums">€ {{ total_sum_formatted }}</span>
+    </div>
+    {% if total_pages > 1 %}
+      <div class="flex items-center gap-2">
+        {% if page > 1 %}
+          <a hx-get="/transactions" hx-include="#filters"
+             hx-vals='{"page": "{{ page - 1 }}"}'
+             hx-target="#results" hx-push-url="true"
+             class="px-2 py-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 cursor-pointer">‹ Prev</a>
+        {% else %}
+          <span class="px-2 py-1 text-slate-300 dark:text-slate-600">‹ Prev</span>
+        {% endif %}
+        <span class="text-slate-500 dark:text-slate-400">Page {{ page }} of {{ total_pages }}</span>
+        {% if page < total_pages %}
+          <a hx-get="/transactions" hx-include="#filters"
+             hx-vals='{"page": "{{ page + 1 }}"}'
+             hx-target="#results" hx-push-url="true"
+             class="px-2 py-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 cursor-pointer">Next ›</a>
+        {% else %}
+          <span class="px-2 py-1 text-slate-300 dark:text-slate-600">Next ›</span>
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+</div>

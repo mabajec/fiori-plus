@@ -1,20 +1,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import SessionLocal
-from app.importer import import_file, peek_pps_element
-from app.models import ImportRun, Project, User
+from app.importer import import_file, parse_amount, peek_pps_element
+from app.models import ImportRun, Project, Transaction, User
+
+
+PAGE_SIZE = 50
+SORT_COLUMNS = {
+    "posting_date": Transaction.posting_date,
+    "amount": Transaction.amount,
+    "account_code": Transaction.account_code,
+}
+
+
+def _format_slo_money(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    s = f"{value:,.2f}"
+    # English: "1,234.56"  →  Slovenian: "1.234,56"
+    return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -245,3 +263,309 @@ class _NeedsName(Exception):
     def __init__(self, pps_element: str):
         super().__init__(f"Need name for new project {pps_element!r}")
         self.pps_element = pps_element
+
+
+# ---------------------------------------------------------------------------
+# Transactions page
+# ---------------------------------------------------------------------------
+
+
+def _accessible_project_ids(session: Session, user_id: int) -> list[int]:
+    # Phase 2b: only own projects. ProjectShare will widen this later.
+    return list(
+        session.scalars(
+            select(Project.id).where(Project.owner_user_id == user_id)
+        )
+    )
+
+
+def _parse_iso_date(s: str | None) -> date | None:
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+@dataclass
+class TransactionView:
+    id: int
+    project_id: int
+    document_number: str
+    account_code: str
+    account_text: str | None
+    amount: Decimal
+    amount_formatted: str
+    posting_date: date
+    employee: str | None
+    text: str | None
+    source: str | None
+    year: int | None
+
+
+def _txn_view(tr: Transaction) -> TransactionView:
+    return TransactionView(
+        id=tr.id,
+        project_id=tr.project_id,
+        document_number=tr.document_number,
+        account_code=tr.account_code,
+        account_text=tr.account_text,
+        amount=tr.amount,
+        amount_formatted=_format_slo_money(tr.amount),
+        posting_date=tr.posting_date,
+        employee=tr.employee,
+        text=tr.text,
+        source=tr.source,
+        year=tr.year,
+    )
+
+
+@app.get("/transactions", response_class=HTMLResponse)
+def transactions_page(
+    request: Request,
+    project_id: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    account_code: Optional[str] = None,
+    q: Optional[str] = None,
+    source: Optional[str] = None,
+    sort: str = "posting_date",
+    dir: str = "desc",
+    page: int = 1,
+) -> HTMLResponse:
+    if sort not in SORT_COLUMNS:
+        sort = "posting_date"
+    if dir not in ("asc", "desc"):
+        dir = "desc"
+    page = max(1, page)
+
+    df = _parse_iso_date(date_from)
+    dt = _parse_iso_date(date_to)
+    project_id = project_id or None
+    account_code = (account_code or "").strip() or None
+    q = (q or "").strip() or None
+    source = (source or "").strip() or None
+
+    with SessionLocal() as session:
+        user = _current_user(session)
+        accessible = _accessible_project_ids(session, user.id)
+
+        base_where = [Transaction.project_id.in_(accessible)] if accessible else [Transaction.id == -1]
+        if project_id is not None:
+            base_where.append(Transaction.project_id == project_id)
+        if df is not None:
+            base_where.append(Transaction.posting_date >= df)
+        if dt is not None:
+            base_where.append(Transaction.posting_date <= dt)
+        if account_code:
+            base_where.append(Transaction.account_code.ilike(f"%{account_code}%"))
+        if source:
+            base_where.append(Transaction.source == source)
+        if q:
+            like = f"%{q}%"
+            base_where.append(
+                or_(Transaction.text.ilike(like), Transaction.employee.ilike(like))
+            )
+
+        totals = session.execute(
+            select(func.count(), func.coalesce(func.sum(Transaction.amount), 0))
+            .select_from(Transaction)
+            .where(*base_where)
+        ).one()
+        total_count, total_sum = totals
+
+        sort_col = SORT_COLUMNS[sort]
+        order = sort_col.desc() if dir == "desc" else sort_col.asc()
+        tiebreak = Transaction.id.desc() if dir == "desc" else Transaction.id.asc()
+
+        offset = (page - 1) * PAGE_SIZE
+        rows_q = (
+            select(Transaction, Project)
+            .join(Project, Transaction.project_id == Project.id)
+            .where(*base_where)
+            .order_by(order, tiebreak)
+            .limit(PAGE_SIZE)
+            .offset(offset)
+        )
+        rows = [(_txn_view(tr), proj) for tr, proj in session.execute(rows_q).all()]
+
+        projects = list(
+            session.scalars(
+                select(Project)
+                .where(Project.owner_user_id == user.id)
+                .order_by(Project.name)
+            )
+        )
+        sources = list(
+            session.scalars(
+                select(Transaction.source)
+                .where(Transaction.project_id.in_(accessible) if accessible else False)
+                .where(Transaction.source.isnot(None))
+                .distinct()
+                .order_by(Transaction.source)
+            )
+        )
+
+    total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    context = {
+        "rows": rows,
+        "projects": projects,
+        "sources": sources,
+        "filters": {
+            "project_id": project_id,
+            "date_from": date_from,
+            "date_to": date_to,
+            "account_code": account_code,
+            "q": q,
+            "source": source,
+        },
+        "sort": sort,
+        "dir": dir,
+        "page": page,
+        "total_pages": total_pages,
+        "total_count": total_count,
+        "total_sum_formatted": _format_slo_money(total_sum),
+    }
+
+    template = (
+        "_transactions_results.html"
+        if request.headers.get("HX-Request")
+        else "transactions.html"
+    )
+    return templates.TemplateResponse(request, template, context)
+
+
+# ---------------------------------------------------------------------------
+# Edit a single transaction
+# ---------------------------------------------------------------------------
+
+
+def _form_from_txn(tr: Transaction) -> dict:
+    return {
+        "posting_date": tr.posting_date.isoformat(),
+        "amount": _format_slo_money(tr.amount),
+        "document_number": tr.document_number,
+        "account_code": tr.account_code,
+        "account_text": tr.account_text,
+        "employee": tr.employee,
+        "text": tr.text,
+        "source": tr.source,
+        "year": tr.year,
+    }
+
+
+def _load_owned_txn(session: Session, user_id: int, txn_id: int) -> tuple[Transaction, Project]:
+    accessible = _accessible_project_ids(session, user_id)
+    row = session.execute(
+        select(Transaction, Project)
+        .join(Project, Transaction.project_id == Project.id)
+        .where(Transaction.id == txn_id, Transaction.project_id.in_(accessible))
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return row
+
+
+@app.get("/transactions/{txn_id}/edit", response_class=HTMLResponse)
+def edit_modal(request: Request, txn_id: int) -> HTMLResponse:
+    with SessionLocal() as session:
+        user = _current_user(session)
+        tr, proj = _load_owned_txn(session, user.id, txn_id)
+        return templates.TemplateResponse(
+            request,
+            "_edit_modal.html",
+            {"tr": tr, "proj": proj, "form": _form_from_txn(tr), "error": None},
+        )
+
+
+@app.post("/transactions/{txn_id}", response_class=HTMLResponse)
+def update_transaction(
+    request: Request,
+    txn_id: int,
+    posting_date: str = Form(...),
+    amount: str = Form(...),
+    document_number: str = Form(...),
+    account_code: str = Form(...),
+    account_text: Optional[str] = Form(default=None),
+    employee: Optional[str] = Form(default=None),
+    text: Optional[str] = Form(default=None),
+    source: Optional[str] = Form(default=None),
+    year: Optional[str] = Form(default=None),
+) -> HTMLResponse:
+    raw_form = {
+        "posting_date": posting_date,
+        "amount": amount,
+        "document_number": document_number,
+        "account_code": account_code,
+        "account_text": account_text,
+        "employee": employee,
+        "text": text,
+        "source": source,
+        "year": year,
+    }
+
+    with SessionLocal() as session:
+        user = _current_user(session)
+        tr, proj = _load_owned_txn(session, user.id, txn_id)
+
+        def fail(msg: str) -> HTMLResponse:
+            return templates.TemplateResponse(
+                request,
+                "_edit_modal.html",
+                {"tr": tr, "proj": proj, "form": raw_form, "error": msg},
+            )
+
+        try:
+            parsed_date = date.fromisoformat(posting_date.strip())
+        except ValueError:
+            return fail(f"Posting date {posting_date!r} is not a valid date.")
+        try:
+            parsed_amount = parse_amount(amount)
+        except Exception:
+            return fail(
+                f"Amount {amount!r} is not a valid number. "
+                "Use the Slovenian format, e.g. 1.234,56"
+            )
+        parsed_year: Optional[int] = None
+        if year and year.strip():
+            try:
+                parsed_year = int(year.strip())
+            except ValueError:
+                return fail(f"Year {year!r} is not a valid integer.")
+
+        def n(v: Optional[str]) -> Optional[str]:
+            return v.strip() if v and v.strip() else None
+
+        tr.posting_date = parsed_date
+        tr.amount = parsed_amount
+        tr.document_number = document_number.strip()
+        tr.account_code = account_code.strip()
+        tr.account_text = n(account_text)
+        tr.employee = n(employee)
+        tr.text = n(text)
+        tr.source = n(source)
+        tr.year = parsed_year
+
+        try:
+            session.flush()
+        except IntegrityError as exc:
+            session.rollback()
+            if "uq_transactions_natural_key" in str(exc.orig):
+                return fail(
+                    "This change would create a duplicate of another transaction "
+                    "in the same project (same document, account, date, amount, "
+                    "employee and text). Pick different values."
+                )
+            return fail(f"Database rejected the change: {exc.orig}")
+
+        session.commit()
+        session.refresh(tr)
+
+        updated_view = _txn_view(tr)
+        return templates.TemplateResponse(
+            request,
+            "_transaction_row.html",
+            {"tr": updated_view, "proj": proj, "oob": True},
+        )
