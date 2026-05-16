@@ -24,7 +24,7 @@
       </div>
       <div>
         <div class="text-xs text-slate-500 dark:text-slate-400">Projected year-end</div>
-        <div class="font-semibold tabular-nums">€ {{ s.projection_fmt }}</div>
+        <div class="font-semibold tabular-nums {% if s.budget and s.projection and s.projection > s.budget %}text-red-600 dark:text-red-400{% endif %}">€ {{ s.projection_fmt }}</div>
       </div>
       <div>
         <div class="text-xs text-slate-500 dark:text-slate-400">Budget</div>

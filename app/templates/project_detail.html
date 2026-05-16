@@ -45,7 +45,7 @@
     </div>
     <div>
       <div class="text-xs text-slate-500 dark:text-slate-400">Projected year-end</div>
-      <div class="text-xl font-semibold tabular-nums">
+      <div class="text-xl font-semibold tabular-nums {% if budget and summary.projection and summary.projection > budget %}text-red-600 dark:text-red-400{% endif %}">
         {% if summary.projection is not none %}€ {{ summary.projection | slo_money }}{% else %}—{% endif %}
       </div>
       <div class="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{{ summary.days_elapsed }}/{{ summary.days_in_year }} days</div>
@@ -144,7 +144,7 @@
               € {{ row.spent | slo_money }}
             </button>
           </td>
-          <td class="px-4 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+          <td class="px-4 py-2 text-right tabular-nums {% if row.budgeted and row.projected and row.projected > row.budgeted %}text-red-600 dark:text-red-400 font-semibold{% else %}text-slate-500 dark:text-slate-400{% endif %}">
             {% if row.projected is not none %}€ {{ row.projected | slo_money }}{% else %}<span class="text-slate-400 dark:text-slate-500">—</span>{% endif %}
           </td>
           <td class="px-4 py-2 text-right tabular-nums">
