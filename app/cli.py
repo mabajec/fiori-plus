@@ -102,5 +102,17 @@ def import_cmd(
     )
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    reload: bool = typer.Option(True, "--reload/--no-reload"),
+) -> None:
+    """Run the web UI."""
+    import uvicorn
+
+    uvicorn.run("app.web:app", host=host, port=port, reload=reload)
+
+
 if __name__ == "__main__":
     app()

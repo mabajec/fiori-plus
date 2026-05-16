@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://fiori:fiori@localhost:5432/fiori"
     default_admin_email: str = "admin@local"
     default_admin_name: str = "Admin"
+    inputs_dir: str = "./inputs"
 
 
 settings = Settings()

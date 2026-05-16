@@ -1,0 +1,65 @@
+{# A single file card. Swapped via HTMX on each action. #}
+<div id="file-card-{{ entry.id }}"
+     class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 hover:shadow-sm dark:hover:shadow-slate-900/50 transition-shadow">
+  {% if entry.import_run %}
+    <div class="flex items-center gap-5">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-3 mb-1">
+          <span class="font-semibold truncate">{{ entry.filename }}</span>
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Imported
+          </span>
+        </div>
+        <div class="text-xs text-slate-500 dark:text-slate-400">
+          {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
+        </div>
+        <div class="text-sm text-slate-600 dark:text-slate-300 mt-1">
+          {{ entry.import_run.project_name }}
+          <span class="text-slate-400 dark:text-slate-500">
+            — {{ entry.import_run.rows_imported }} rows, {{ entry.import_run.rows_skipped }} skipped, on {{ entry.import_run.imported_at.strftime('%Y-%m-%d %H:%M') }}
+          </span>
+        </div>
+      </div>
+      <div class="text-slate-300 dark:text-slate-600 text-xl">—</div>
+    </div>
+  {% elif entry.error %}
+    <div class="flex items-center gap-3 mb-2">
+      <span class="font-semibold truncate">{{ entry.filename }}</span>
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 text-xs font-medium">
+        <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>Error
+      </span>
+    </div>
+    <div class="text-xs text-slate-500 dark:text-slate-400 mb-2">
+      {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
+    </div>
+    <div class="text-sm text-red-600 dark:text-red-400">{{ entry.error }}</div>
+  {% else %}
+    <div class="flex items-center gap-3 mb-3">
+      <span class="font-semibold truncate">{{ entry.filename }}</span>
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 text-xs font-medium">
+        <span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>New
+      </span>
+    </div>
+    <div class="text-xs text-slate-500 dark:text-slate-400 mb-3">
+      {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
+      {% if entry.pps_element %}
+        · PPS element <code class="bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">{{ entry.pps_element }}</code>
+      {% endif %}
+    </div>
+    <form hx-post="/imports/{{ entry.filename|urlencode }}"
+          hx-target="#file-card-{{ entry.id }}"
+          hx-swap="outerHTML"
+          class="flex gap-2">
+      {% if entry.needs_name %}
+        <input type="text" name="name" required
+               value="{{ entry.suggested_name or '' }}"
+               placeholder="Friendly name"
+               class="flex-1 px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-900 dark:text-slate-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+      {% endif %}
+      <button type="submit"
+              class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors {% if not entry.needs_name %}ml-auto{% endif %}">
+        Import
+      </button>
+    </form>
+  {% endif %}
+</div>

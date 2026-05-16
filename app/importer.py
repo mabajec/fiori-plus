@@ -91,6 +91,19 @@ def _build_field_map(header_cells: list[str]) -> dict[int, str]:
     return field_map
 
 
+def peek_pps_element(path: Path, encoding: str = DEFAULT_ENCODING) -> str:
+    """Return the PPS element from the first data row, without parsing the rest.
+
+    Used by the UI to decide whether the project is already known (no name
+    prompt needed) before kicking off a full import.
+    """
+    for rec in read_records(path, encoding=encoding):
+        pps = rec.get("pps_element")
+        if pps:
+            return pps
+    raise ValueError(f"No data rows found in {path}.")
+
+
 def read_footer_total(path: Path, encoding: str = DEFAULT_ENCODING) -> Decimal:
     """Return the total amount from the `*` footer row.
 

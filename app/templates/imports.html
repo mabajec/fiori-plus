@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Imports — Fiori{% endblock %}
+{% block content %}
+<div class="mb-8">
+  <h1 class="text-2xl font-semibold mb-1">Imports</h1>
+  <p class="text-sm text-slate-500 dark:text-slate-400">
+    Files scanned from <code class="bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-xs">{{ inputs_dir }}</code>
+  </p>
+</div>
+
+{% if not entries %}
+  <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mb-12 text-sm text-slate-500 dark:text-slate-400">
+    No files found in <code class="bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">{{ inputs_dir }}</code>. Drop a TSV export there and reload.
+  </div>
+{% else %}
+  <div class="space-y-3 mb-12">
+    {% for entry in entries %}
+      {% include "_file_card.html" %}
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% include "_runs_table.html" %}
+{% endblock %}
