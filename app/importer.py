@@ -91,6 +91,37 @@ def _build_field_map(header_cells: list[str]) -> dict[int, str]:
     return field_map
 
 
+def read_footer_total(path: Path, encoding: str = DEFAULT_ENCODING) -> Decimal:
+    """Return the total amount from the `*` footer row.
+
+    Every export from the source system ends with a `* | ... | total` row.
+    Comparing that figure against the sum of parsed rows is our safety net
+    against silent parsing or encoding errors.
+    """
+    with open(path, encoding=encoding) as f:
+        text = f.read()
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        cells = raw.split("\t")
+        while cells and cells[0] == "":
+            cells.pop(0)
+        if not cells:
+            continue
+        if cells[0].strip() == "*":
+            for cell in reversed(cells):
+                stripped = cell.strip()
+                if stripped and stripped != "*":
+                    return parse_amount(stripped)
+            raise ValueError(
+                f"`*` footer in {path} has no total amount."
+            )
+    raise ValueError(
+        f"No `*` totals footer in {path}. Every export from the source "
+        f"system should include one — refusing to import."
+    )
+
+
 def read_records(
     path: Path, encoding: str = DEFAULT_ENCODING
 ) -> Iterator[dict]:
@@ -203,6 +234,15 @@ def import_file(
     records = [parse_record(r) for r in read_records(path, encoding=encoding)]
     if not records:
         raise ValueError("File contains no data rows.")
+
+    footer_total = read_footer_total(path, encoding=encoding)
+    parsed_total = sum((r["amount"] for r in records), start=Decimal("0"))
+    if parsed_total != footer_total:
+        raise ValueError(
+            f"Total mismatch: parsed rows sum to {parsed_total}, but the "
+            f"file footer reports {footer_total} (delta "
+            f"{parsed_total - footer_total}). Refusing to import."
+        )
 
     pps_element = records[0]["pps_element"]
     for r in records:
