@@ -2,6 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -25,6 +26,10 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
     password_hash: Mapped[str | None] = mapped_column(String(255))
+    totp_secret: Mapped[str | None] = mapped_column(String(64))
+    force_password_change: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

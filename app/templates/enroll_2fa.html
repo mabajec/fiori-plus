@@ -1,0 +1,36 @@
+{% extends "_auth_base.html" %}
+{% block title %}Set up 2FA — Fiori{% endblock %}
+{% block content %}
+<h1 class="text-lg font-semibold mb-1">Set up two-factor authentication</h1>
+<p class="text-sm text-slate-500 dark:text-slate-400 mb-5">
+  Scan the QR code with your authenticator app (Google Authenticator, Authy, 1Password, etc.) and enter the 6-digit code it generates.
+</p>
+
+{% if error %}
+  <div class="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+    {{ error }}
+  </div>
+{% endif %}
+
+<div class="flex justify-center mb-4 [&>svg]:w-48 [&>svg]:h-48 [&_path]:dark:fill-white">
+  {{ qr_svg | safe }}
+</div>
+
+<details class="mb-5 text-xs">
+  <summary class="cursor-pointer text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400">Can't scan? Enter the secret manually.</summary>
+  <code class="block mt-2 p-2 bg-slate-100 dark:bg-slate-900 rounded font-mono tabular-nums break-all">{{ secret }}</code>
+</details>
+
+<form method="post" action="/login/enroll-2fa" class="space-y-4">
+  <div>
+    <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">6-digit code</label>
+    <input type="text" name="code" required autofocus inputmode="numeric" pattern="[0-9]*" maxlength="6"
+           autocomplete="one-time-code"
+           class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-center text-lg tracking-widest tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-500">
+  </div>
+  <button type="submit"
+          class="w-full px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors">
+    Verify and continue
+  </button>
+</form>
+{% endblock %}

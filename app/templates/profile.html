@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Profile — Fiori{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold mb-1">Profile</h1>
+  <p class="text-sm text-slate-500 dark:text-slate-400">Manage your account.</p>
+</div>
+
+{% if saved %}
+  <div class="mb-4 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800 text-sm text-emerald-700 dark:text-emerald-300">
+    Password changed.
+  </div>
+{% endif %}
+{% if error %}
+  <div class="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+    {{ error }}
+  </div>
+{% endif %}
+
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 mb-4">
+  <h2 class="text-base font-semibold mb-3">Account</h2>
+  <dl class="text-sm grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2">
+    <dt class="text-slate-500 dark:text-slate-400">Email</dt>
+    <dd class="font-medium">{{ user.email }}</dd>
+    <dt class="text-slate-500 dark:text-slate-400">Name</dt>
+    <dd>{{ user.name or '—' }}</dd>
+    <dt class="text-slate-500 dark:text-slate-400">Role</dt>
+    <dd class="font-mono text-xs">{{ user.role }}</dd>
+    <dt class="text-slate-500 dark:text-slate-400">Two-factor</dt>
+    <dd>
+      {% if user.totp_secret %}
+        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>enrolled
+        </span>
+        <span class="text-xs text-slate-500 dark:text-slate-400 ml-1">Ask the administrator to reset it if you lose your authenticator.</span>
+      {% else %}
+        <span class="text-slate-500 dark:text-slate-400 text-xs">not enrolled</span>
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5">
+  <h2 class="text-base font-semibold mb-3">Change password</h2>
+  <form method="post" action="/profile/password" class="space-y-4 max-w-md">
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Current password</label>
+      <input type="password" name="current_password" required autocomplete="current-password"
+             class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">New password (min 10 characters)</label>
+      <input type="password" name="new_password" required minlength="10" autocomplete="new-password"
+             class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">Confirm new password</label>
+      <input type="password" name="confirm_password" required minlength="10" autocomplete="new-password"
+             class="w-full px-3 py-2 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+    </div>
+    <button type="submit"
+            class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors">
+      Change password
+    </button>
+  </form>
+</section>
+{% endblock %}

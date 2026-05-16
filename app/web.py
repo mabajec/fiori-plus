@@ -7,12 +7,15 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.middleware.sessions import SessionMiddleware
 
+from app import totp as totp_helper
+from app.auth import hash_password, verify_password
 from app.config import settings
 from app.db import SessionLocal
 from app.importer import import_file, parse_amount, peek_pps_element
@@ -73,19 +76,66 @@ class FileEntry:
 app = FastAPI(title="Fiori")
 
 
+# Paths that don't require a logged-in session. Everything else is gated.
+PUBLIC_PATHS = {
+    "/login",
+    "/login/change-password",
+    "/login/enroll-2fa",
+    "/login/2fa",
+    "/logout",
+}
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith("/static"):
+        return await call_next(request)
+    if not request.session.get("auth_user_id"):
+        return RedirectResponse("/login", status_code=303)
+    # Make the user available to every template via request.state for the
+    # header / profile link.
+    uid = request.session["auth_user_id"]
+    with SessionLocal() as s:
+        u = s.get(User, uid)
+        if u is None:
+            request.session.clear()
+            return RedirectResponse("/login", status_code=303)
+        # Detach a lightweight snapshot we can read from templates without a
+        # live session — actual mutations always go through a fresh session.
+        request.state.current_user_email = u.email
+        request.state.current_user_name = u.name
+        request.state.current_user_role = u.role
+    return await call_next(request)
+
+
+# SessionMiddleware must be added AFTER the auth middleware. Starlette wraps
+# in reverse order of addition, so the last-added middleware is the outermost;
+# we need SessionMiddleware to be outer so it populates request.session
+# BEFORE require_login reads it.
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret,
+    same_site="lax",
+    https_only=settings.session_https_only,
+    max_age=settings.session_max_age_days * 86400,
+)
+
+
 def _inputs_dir() -> Path:
     return Path(settings.inputs_dir).resolve()
 
 
-def _current_user(session: Session) -> User:
-    user = session.scalar(
-        select(User).where(User.email == settings.default_admin_email)
-    )
+def _current_user(session: Session, request: Request) -> User:
+    user_id = request.session.get("auth_user_id")
+    if not user_id:
+        # require_login middleware should have prevented this; defensive fall-back.
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = session.get(User, user_id)
     if user is None:
-        raise HTTPException(
-            status_code=500,
-            detail="No admin user found. Run `fiori init` first.",
-        )
+        # Stale session pointing to a deleted user — clear it.
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="Session invalid")
     return user
 
 
@@ -154,14 +204,14 @@ def _build_entry(session: Session, user_id: int, path: Path) -> FileEntry:
 
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
-    return RedirectResponse(url="/imports")
+    return RedirectResponse(url="/projects")
 
 
 @app.get("/imports", response_class=HTMLResponse)
 def imports_page(request: Request) -> HTMLResponse:
     inputs_dir = _inputs_dir()
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
 
         entries: list[FileEntry] = []
         if inputs_dir.exists():
@@ -202,7 +252,7 @@ def do_import(
         raise HTTPException(status_code=404, detail="File not found")
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
 
         resolved_name: Optional[str] = name.strip() if name else None
 
@@ -356,7 +406,7 @@ def transactions_page(
     source = (source or "").strip() or None
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         accessible = _accessible_project_ids(session, user.id)
 
         base_where = [Transaction.project_id.in_(accessible)] if accessible else [Transaction.id == -1]
@@ -479,7 +529,7 @@ def _load_owned_txn(session: Session, user_id: int, txn_id: int) -> tuple[Transa
 @app.get("/transactions/{txn_id}/edit", response_class=HTMLResponse)
 def edit_modal(request: Request, txn_id: int) -> HTMLResponse:
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         tr, proj = _load_owned_txn(session, user.id, txn_id)
         return templates.TemplateResponse(
             request,
@@ -515,7 +565,7 @@ def update_transaction(
     }
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         tr, proj = _load_owned_txn(session, user.id, txn_id)
 
         def fail(msg: str) -> HTMLResponse:
@@ -694,7 +744,7 @@ def projects_list(request: Request) -> HTMLResponse:
     from app.analytics import project_summary, structure_breakdown
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         projects = list(
             session.scalars(
                 select(Project)
@@ -817,7 +867,7 @@ def _load_project_for_settings(session: Session, user_id: int, project_id: int):
 @app.get("/projects/{project_id}/settings", response_class=HTMLResponse)
 def project_settings(request: Request, project_id: int, saved: int = 0, error: str = "") -> HTMLResponse:
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         project, annual_views = _load_project_for_settings(session, user.id, project_id)
         # We need the annual_views attached for the template loop. Re-render
         # project's annual_data as views, since template iterates project.annual_data.
@@ -858,7 +908,7 @@ async def save_project_settings(request: Request, project_id: int) -> HTMLRespon
     import re
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         project = session.scalar(
             select(Project).where(
                 Project.id == project_id, Project.owner_user_id == user.id
@@ -1026,7 +1076,7 @@ def project_detail(
     )
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         project = session.scalar(
             select(Project).where(
                 Project.id == project_id, Project.owner_user_id == user.id
@@ -1157,7 +1207,7 @@ def cell_expansion(
         raise HTTPException(status_code=400, detail="month must be 1..12")
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         project = session.scalar(
             select(Project).where(
                 Project.id == project_id, Project.owner_user_id == user.id
@@ -1221,7 +1271,7 @@ def category_transactions(
     from app.analytics import OTHER_LINE_ID
 
     with SessionLocal() as session:
-        user = _current_user(session)
+        user = _current_user(session, request)
         project = session.scalar(
             select(Project).where(
                 Project.id == project_id, Project.owner_user_id == user.id
@@ -1292,3 +1342,265 @@ def category_transactions(
         "_category_expansion.html",
         {"txns": txns, "total": total, "heading": heading},
     )
+
+
+# ---------------------------------------------------------------------------
+# Authentication flow: /login → password → maybe change-password → maybe
+# enroll-2fa → 2fa verification → logged in.
+# Session keys:
+#   pending_user_id : authenticated by password, not yet by 2FA
+#   pending_force_password_change : True while user must reset their password
+#   pending_totp_secret : new TOTP secret being enrolled (not yet saved)
+#   auth_user_id  : fully authenticated; gated routes accept this
+# ---------------------------------------------------------------------------
+
+
+def _go_after_login(request: Request, user: User) -> RedirectResponse:
+    """Pick the next step after a valid password submission."""
+    if user.force_password_change:
+        request.session["pending_force_password_change"] = True
+        return RedirectResponse("/login/change-password", status_code=303)
+    if not user.totp_secret:
+        request.session["pending_totp_secret"] = totp_helper.generate_secret()
+        return RedirectResponse("/login/enroll-2fa", status_code=303)
+    return RedirectResponse("/login/2fa", status_code=303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request) -> HTMLResponse:
+    if request.session.get("auth_user_id"):
+        return RedirectResponse("/projects", status_code=303)
+    return templates.TemplateResponse(
+        request, "login.html", {"error": None, "email": ""}
+    )
+
+
+@app.post("/login")
+def login_submit(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+) -> Response:
+    email = email.strip().lower()
+    with SessionLocal() as session:
+        user = session.scalar(select(User).where(User.email == email))
+        if user is None or not verify_password(password, user.password_hash):
+            return templates.TemplateResponse(
+                request,
+                "login.html",
+                {"error": "Invalid email or password.", "email": email},
+                status_code=400,
+            )
+        # Clear any leftover partial-login state.
+        request.session.pop("pending_user_id", None)
+        request.session.pop("pending_force_password_change", None)
+        request.session.pop("pending_totp_secret", None)
+        request.session["pending_user_id"] = user.id
+        return _go_after_login(request, user)
+
+
+def _require_pending_user(request: Request, session: Session) -> User | RedirectResponse:
+    uid = request.session.get("pending_user_id")
+    if not uid:
+        return RedirectResponse("/login", status_code=303)
+    user = session.get(User, uid)
+    if user is None:
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
+    return user
+
+
+@app.get("/login/change-password", response_class=HTMLResponse)
+def change_password_forced_page(request: Request) -> Response:
+    with SessionLocal() as session:
+        user = _require_pending_user(request, session)
+        if isinstance(user, RedirectResponse):
+            return user
+    return templates.TemplateResponse(
+        request,
+        "change_password.html",
+        {
+            "error": None,
+            "forced": True,
+            "action_url": "/login/change-password",
+        },
+    )
+
+
+@app.post("/login/change-password")
+def change_password_forced_submit(
+    request: Request,
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> Response:
+    if new_password != confirm_password:
+        return templates.TemplateResponse(
+            request,
+            "change_password.html",
+            {
+                "error": "The two passwords don't match.",
+                "forced": True,
+                "action_url": "/login/change-password",
+            },
+            status_code=400,
+        )
+    if len(new_password) < 10:
+        return templates.TemplateResponse(
+            request,
+            "change_password.html",
+            {
+                "error": "Password must be at least 10 characters.",
+                "forced": True,
+                "action_url": "/login/change-password",
+            },
+            status_code=400,
+        )
+    with SessionLocal() as session:
+        user = _require_pending_user(request, session)
+        if isinstance(user, RedirectResponse):
+            return user
+        user.password_hash = hash_password(new_password)
+        user.force_password_change = False
+        session.commit()
+        request.session.pop("pending_force_password_change", None)
+        # Continue down the login funnel.
+        return _go_after_login(request, user)
+
+
+@app.get("/login/enroll-2fa", response_class=HTMLResponse)
+def enroll_2fa_page(request: Request) -> Response:
+    with SessionLocal() as session:
+        user = _require_pending_user(request, session)
+        if isinstance(user, RedirectResponse):
+            return user
+    secret = request.session.get("pending_totp_secret")
+    if not secret:
+        # Direct GET — generate and remember a fresh secret for this attempt.
+        secret = totp_helper.generate_secret()
+        request.session["pending_totp_secret"] = secret
+    uri = totp_helper.provisioning_uri(
+        email=user.email, secret=secret, issuer=settings.totp_issuer
+    )
+    return templates.TemplateResponse(
+        request,
+        "enroll_2fa.html",
+        {"error": None, "qr_svg": totp_helper.qr_svg(uri), "secret": secret},
+    )
+
+
+@app.post("/login/enroll-2fa")
+def enroll_2fa_submit(
+    request: Request, code: str = Form(...)
+) -> Response:
+    secret = request.session.get("pending_totp_secret")
+    if not secret:
+        return RedirectResponse("/login", status_code=303)
+    with SessionLocal() as session:
+        user = _require_pending_user(request, session)
+        if isinstance(user, RedirectResponse):
+            return user
+        if not totp_helper.verify_code(secret, code):
+            uri = totp_helper.provisioning_uri(
+                email=user.email, secret=secret, issuer=settings.totp_issuer
+            )
+            return templates.TemplateResponse(
+                request,
+                "enroll_2fa.html",
+                {
+                    "error": "That code didn't match. Try again with a fresh one.",
+                    "qr_svg": totp_helper.qr_svg(uri),
+                    "secret": secret,
+                },
+                status_code=400,
+            )
+        user.totp_secret = secret
+        session.commit()
+        request.session.pop("pending_totp_secret", None)
+        request.session.pop("pending_user_id", None)
+        request.session["auth_user_id"] = user.id
+        return RedirectResponse("/projects", status_code=303)
+
+
+@app.get("/login/2fa", response_class=HTMLResponse)
+def verify_2fa_page(request: Request) -> Response:
+    with SessionLocal() as session:
+        user = _require_pending_user(request, session)
+        if isinstance(user, RedirectResponse):
+            return user
+        if not user.totp_secret:
+            return RedirectResponse("/login/enroll-2fa", status_code=303)
+    return templates.TemplateResponse(
+        request, "login_2fa.html", {"error": None}
+    )
+
+
+@app.post("/login/2fa")
+def verify_2fa_submit(
+    request: Request, code: str = Form(...)
+) -> Response:
+    with SessionLocal() as session:
+        user = _require_pending_user(request, session)
+        if isinstance(user, RedirectResponse):
+            return user
+        if not user.totp_secret or not totp_helper.verify_code(user.totp_secret, code):
+            return templates.TemplateResponse(
+                request,
+                "login_2fa.html",
+                {"error": "Invalid code. Try the next one your app shows."},
+                status_code=400,
+            )
+        request.session.pop("pending_user_id", None)
+        request.session["auth_user_id"] = user.id
+        return RedirectResponse("/projects", status_code=303)
+
+
+@app.post("/logout")
+def logout(request: Request) -> RedirectResponse:
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Profile page: view account info, voluntary change-password
+# ---------------------------------------------------------------------------
+
+
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, saved: int = 0, error: str = "") -> HTMLResponse:
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        return templates.TemplateResponse(
+            request,
+            "profile.html",
+            {
+                "user": user,
+                "saved": bool(saved),
+                "error": error or None,
+            },
+        )
+
+
+@app.post("/profile/password")
+def profile_change_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> RedirectResponse:
+    from urllib.parse import quote
+
+    def fail(msg: str) -> RedirectResponse:
+        return RedirectResponse(f"/profile?error={quote(msg)}", status_code=303)
+
+    if new_password != confirm_password:
+        return fail("The two new passwords don't match.")
+    if len(new_password) < 10:
+        return fail("Password must be at least 10 characters.")
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        if not verify_password(current_password, user.password_hash):
+            return fail("Current password is incorrect.")
+        user.password_hash = hash_password(new_password)
+        user.force_password_change = False
+        session.commit()
+    return RedirectResponse("/profile?saved=1", status_code=303)

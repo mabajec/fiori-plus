@@ -5,11 +5,15 @@ description = "Project financial data importer and viewer"
 requires-python = ">=3.10"
 dependencies = [
     "alembic>=1.13",
+    "bcrypt>=4.0",
     "fastapi>=0.115",
+    "itsdangerous>=2.2",
     "jinja2>=3.1",
     "psycopg[binary]>=3.1",
     "pydantic-settings>=2.0",
+    "pyotp>=2.9",
     "python-multipart>=0.0.9",
+    "qrcode>=7.4",
     "sqlalchemy>=2.0",
     "typer>=0.12",
     "uvicorn[standard]>=0.30",
