@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Python virtual environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Data — never commit; may contain sensitive payroll info
+inputs/
+outputs/
+sample_input.tsv
+sample_output.tsv
