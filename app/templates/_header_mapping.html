@@ -1,0 +1,109 @@
+{# Header mapping panel. Two entry points use this template:
+   1. File card's "Map columns" call-to-action (file's headers don't parse)
+   2. File card's "Edit" link next to a "Using saved mapping" badge
+   Both submit to POST /imports/{filename}/mapping. #}
+<div id="mapping-panel-{{ entry_id }}"
+     class="bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700 rounded-xl p-5">
+  <div class="flex items-start justify-between mb-3">
+    <div>
+      <h3 class="text-base font-semibold">Map columns for <span class="font-mono">{{ filename }}</span></h3>
+      <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">
+        {% if nothing_to_map %}
+          This file's headers already match the expected columns — nothing to map.
+        {% elif saved %}
+          You're editing the saved mapping from {{ saved.created_at.strftime('%Y-%m-%d %H:%M') }}.
+          Used {{ saved.use_count }} time{{ '' if saved.use_count == 1 else 's' }}.
+        {% else %}
+          We couldn't recognise {{ resolution.unrecognized|length }} column name{{ '' if resolution.unrecognized|length == 1 else 's' }}.
+          Pick the right field for each. Suggestions are pre-filled when we're fairly sure.
+        {% endif %}
+      </p>
+    </div>
+    <button type="button"
+            hx-get="/imports/{{ filename|urlencode }}/card"
+            hx-target="#file-card-{{ entry_id }}"
+            hx-swap="outerHTML"
+            class="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+            aria-label="Close">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+      </svg>
+    </button>
+  </div>
+
+  {% if nothing_to_map %}
+    <div class="text-sm text-slate-600 dark:text-slate-300">
+      No unmapped columns. If you're here to edit a saved mapping, it's already been forgotten or no longer applies to this file's headers.
+    </div>
+  {% else %}
+    <form hx-post="/imports/{{ filename|urlencode }}/mapping"
+          hx-target="#file-card-{{ entry_id }}"
+          hx-swap="outerHTML"
+          class="space-y-3">
+      <input type="hidden" name="signature" value="{{ resolution.signature }}">
+      <div class="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-50 dark:bg-slate-900/40 text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            <tr>
+              <th class="px-3 py-2 text-left font-medium">File column</th>
+              <th class="px-3 py-2 text-left font-medium">Maps to</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for h in resolution.unrecognized %}
+              {% set chosen = preselected.get(h, '') %}
+              <tr class="border-t border-slate-100 dark:border-slate-700">
+                <td class="px-3 py-2 font-mono text-xs">{{ h }}</td>
+                <td class="px-3 py-2">
+                  <select name="map:{{ h }}"
+                          class="px-2 py-1 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <option value="">— ignore this column —</option>
+                    {% for field, canonical, required in field_options %}
+                      <option value="{{ field }}" {% if chosen == field %}selected{% endif %}>
+                        {{ canonical }}{% if required %} *{% endif %} ({{ field }})
+                      </option>
+                    {% endfor %}
+                  </select>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="text-xs text-slate-500 dark:text-slate-400">
+        * required field. The mapping is saved per signature, so any future file with these same column names auto-applies it.
+      </p>
+      {% if resolution.missing_required %}
+        <div class="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+          Still missing: <span class="font-mono">{{ resolution.missing_required|sort|join(', ') }}</span>
+        </div>
+      {% endif %}
+      <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
+        <div class="flex items-center gap-2">
+          {% if saved %}
+            <button type="button"
+                    hx-delete="/imports/mappings/{{ saved.id }}?filename={{ filename|urlencode }}"
+                    hx-target="#file-card-{{ entry_id }}"
+                    hx-swap="outerHTML"
+                    class="px-3 py-2 text-sm font-medium rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors">
+              Forget this mapping
+            </button>
+          {% endif %}
+        </div>
+        <div class="flex items-center gap-2">
+          <button type="button"
+                  hx-get="/imports/{{ filename|urlencode }}/card"
+                  hx-target="#file-card-{{ entry_id }}"
+                  hx-swap="outerHTML"
+                  class="px-3 py-2 text-sm font-medium rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors">
+            Cancel
+          </button>
+          <button type="submit"
+                  class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors">
+            Save mapping
+          </button>
+        </div>
+      </div>
+    </form>
+  {% endif %}
+</div>

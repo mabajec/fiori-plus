@@ -1,0 +1,16 @@
+{# Small badge shown on a file card when the file's headers were resolved
+   via a saved mapping. Clicking Edit opens the mapping panel. #}
+<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-xs"
+      title="A saved column mapping was applied (created {{ entry.saved_mapping_created.strftime('%Y-%m-%d') }})">
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-3 h-3">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+  </svg>
+  Using saved mapping
+  <button type="button"
+          hx-get="/imports/{{ entry.filename|urlencode }}/mapping"
+          hx-target="#file-card-{{ entry.id }}"
+          hx-swap="outerHTML"
+          class="ml-1 text-indigo-600 dark:text-indigo-400 hover:underline">
+    Edit
+  </button>
+</span>

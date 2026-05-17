@@ -19,8 +19,18 @@ from app import totp as totp_helper
 from app.auth import hash_password, verify_password
 from app.config import settings
 from app.db import SessionLocal
-from app.importer import import_file, parse_amount, peek_pps_element
+from app.importer import (
+    ALL_FIELDS,
+    COLUMN_MAP,
+    NeedsHeaderMapping,
+    HeaderResolution,
+    import_file,
+    parse_amount,
+    parse_header,
+    peek_pps_element,
+)
 from app.models import (
+    HeaderMapping,
     ImportRun,
     Project,
     ProjectAnnualData,
@@ -77,6 +87,14 @@ class FileEntry:
     needs_name: bool = False
     error: Optional[str] = None
     import_run: Optional[ImportRunView] = None
+    # Set when the header row needs the user to map columns before we can
+    # parse it. The card switches to a "Map columns" call-to-action.
+    needs_mapping: bool = False
+    mapping_signature: Optional[str] = None
+    # Set when an existing saved mapping is being used to parse this file —
+    # shows a small badge with Edit / Forget controls.
+    saved_mapping_id: Optional[int] = None
+    saved_mapping_created: Optional[datetime] = None
 
 
 app = FastAPI(title="Fiori")
@@ -165,6 +183,47 @@ def _import_run_view(session: Session, run: ImportRun) -> ImportRunView:
     )
 
 
+def _lookup_saved_mapping(
+    session: Session, user_id: int, signature: str
+) -> Optional[HeaderMapping]:
+    return session.scalar(
+        select(HeaderMapping).where(
+            HeaderMapping.user_id == user_id,
+            HeaderMapping.signature == signature,
+        )
+    )
+
+
+def _resolve_for_file(
+    session: Session, user_id: int, path: Path
+) -> tuple[dict[str, str] | None, Optional[HeaderMapping], Optional[HeaderResolution]]:
+    """Decide what overrides (if any) to apply when parsing `path` for this
+    user. Returns (overrides, saved_mapping, blocking_resolution).
+
+      - overrides is non-None when a saved mapping covers the file's headers
+      - saved_mapping is the ORM row that backed those overrides (for the
+        Edit / Forget UI)
+      - blocking_resolution is non-None when we still can't resolve the
+        headers (caller should switch to the mapping panel); its
+        `signature` is what a future saved mapping would key on
+    """
+    try:
+        parse_header(path)
+        return None, None, None
+    except NeedsHeaderMapping as exc:
+        saved = _lookup_saved_mapping(session, user_id, exc.resolution.signature)
+        if saved is None:
+            return None, None, exc.resolution
+        try:
+            parse_header(path, overrides=saved.mapping)
+        except NeedsHeaderMapping as exc2:
+            # Saved mapping is incomplete (e.g. file gained another unmapped
+            # column). Treat as still-blocking — the user will see the
+            # mapping panel pre-filled with the current saved mapping.
+            return None, saved, exc2.resolution
+        return dict(saved.mapping), saved, None
+
+
 def _build_entry(session: Session, user_id: int, path: Path) -> FileEntry:
     stat = path.stat()
     entry = FileEntry(
@@ -195,10 +254,26 @@ def _build_entry(session: Session, user_id: int, path: Path) -> FileEntry:
         entry.import_run = _import_run_view(session, run)
         return entry
 
-    # Not yet imported — peek the PPS element so we know whether a name prompt
-    # is required.
+    # Not yet imported — work out whether the headers parse natively, with a
+    # saved mapping, or not at all.
     try:
-        pps = peek_pps_element(path)
+        overrides, saved, blocking = _resolve_for_file(session, user_id, path)
+    except Exception as exc:
+        entry.error = f"Cannot read file: {exc}"
+        return entry
+    if blocking is not None:
+        entry.needs_mapping = True
+        entry.mapping_signature = blocking.signature
+        if saved is not None:
+            entry.saved_mapping_id = saved.id
+            entry.saved_mapping_created = saved.created_at
+        return entry
+    if saved is not None:
+        entry.saved_mapping_id = saved.id
+        entry.saved_mapping_created = saved.created_at
+
+    try:
+        pps = peek_pps_element(path, overrides=overrides)
     except Exception as exc:
         entry.error = f"Cannot read file: {exc}"
         return entry
@@ -296,6 +371,17 @@ async def do_import(
                 return resolved_name
             raise _NeedsName(pps)
 
+        overrides, saved, blocking = _resolve_for_file(session, user.id, path)
+        if blocking is not None:
+            # Headers don't resolve; surface the mapping prompt instead of
+            # erroring out — the user couldn't have known until they clicked.
+            entry = _build_entry(session, user.id, path)
+            return templates.TemplateResponse(
+                request, "_file_card.html", {"entry": entry}
+            )
+        if saved is not None:
+            _bump_mapping_use(session, saved)
+
         try:
             result = import_file(
                 session=session,
@@ -305,6 +391,7 @@ async def do_import(
                 mode=mode,
                 new_fingerprints=new_fingerprints,
                 missing_ids=missing_ids,
+                overrides=overrides,
             )
         except _NeedsName as exc:
             entry = FileEntry(
@@ -366,8 +453,25 @@ def analyze_import(request: Request, filename: str) -> HTMLResponse:
 
     with SessionLocal() as session:
         user = _current_user(session, request)
+        overrides, saved, blocking = _resolve_for_file(session, user.id, path)
+        if blocking is not None:
+            # Can't analyze without a working header map. Surface the prompt
+            # in the analyze slot so the user can map and try again.
+            return templates.TemplateResponse(
+                request,
+                "_import_analysis.html",
+                {
+                    "filename": filename,
+                    "error": (
+                        "This file's headers can't be mapped yet — open the "
+                        "Map columns dialog above to assign the unrecognised "
+                        "columns."
+                    ),
+                    "analysis": None,
+                },
+            )
         try:
-            analysis = analyze_file(session, path, user.id)
+            analysis = analyze_file(session, path, user.id, overrides=overrides)
         except ValueError as exc:
             return templates.TemplateResponse(
                 request,
@@ -384,6 +488,174 @@ def analyze_import(request: Request, filename: str) -> HTMLResponse:
             "error": None,
         },
     )
+
+
+def _bump_mapping_use(session: Session, mapping: HeaderMapping) -> None:
+    """Track when a saved mapping is applied. Cheap — incremented inside the
+    same session that's about to commit for the import."""
+    mapping.use_count = (mapping.use_count or 0) + 1
+    mapping.last_used_at = datetime.utcnow()
+
+
+# ---------------------------------------------------------------------------
+# Header mapping endpoints
+# ---------------------------------------------------------------------------
+
+
+# Stable list shown in the mapping dropdown — canonical label paired with
+# the internal field name; required fields surface first.
+_FIELD_OPTIONS: list[tuple[str, str, bool]] = [
+    (field, canonical, field in {
+        "pps_element", "document_number", "account_code", "amount",
+        "posting_date",
+    })
+    for canonical, field in COLUMN_MAP.items()
+]
+
+
+def _mapping_context(
+    session: Session,
+    user_id: int,
+    filename: str,
+    path: Path,
+) -> dict:
+    """Build the template context for the mapping panel. Detects the file's
+    current unrecognized headers, any existing saved mapping, and the
+    suggestions to pre-fill the dropdowns."""
+    try:
+        resolution = parse_header(path)
+        # File parses without help — there's nothing to map. Caller should
+        # generally not have reached this state; we return a "nothing to do"
+        # marker so the template can show it.
+        return {
+            "filename": filename,
+            "entry_id": path.name.replace(".", "_").replace(" ", "_"),
+            "resolution": resolution,
+            "saved": None,
+            "field_options": _FIELD_OPTIONS,
+            "preselected": {},
+            "nothing_to_map": True,
+        }
+    except NeedsHeaderMapping as exc:
+        resolution = exc.resolution
+    saved = _lookup_saved_mapping(session, user_id, resolution.signature)
+    # Pre-fill: saved mapping wins; otherwise use suggestions.
+    preselected: dict[str, str] = {}
+    if saved is not None:
+        preselected.update(saved.mapping or {})
+    for k, v in resolution.suggested.items():
+        preselected.setdefault(k, v)
+    return {
+        "filename": filename,
+        "entry_id": path.name.replace(".", "_").replace(" ", "_"),
+        "resolution": resolution,
+        "saved": saved,
+        "field_options": _FIELD_OPTIONS,
+        "preselected": preselected,
+        "nothing_to_map": False,
+    }
+
+
+@app.get("/imports/{filename}/card", response_class=HTMLResponse)
+def render_file_card(request: Request, filename: str) -> HTMLResponse:
+    """Re-render a single file card. Used by Cancel buttons in the mapping
+    panel to swap the panel back to whatever state the card was in."""
+    inputs_dir = _inputs_dir()
+    path = inputs_dir / filename
+    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
+        raise HTTPException(status_code=404, detail="File not found")
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        entry = _build_entry(session, user.id, path)
+    return templates.TemplateResponse(
+        request, "_file_card.html", {"entry": entry}
+    )
+
+
+@app.get("/imports/{filename}/mapping", response_class=HTMLResponse)
+def show_mapping_panel(request: Request, filename: str) -> HTMLResponse:
+    """Render the header mapping panel for a file. Used both when the file's
+    headers don't auto-resolve (initial mapping) and when the user clicks
+    Edit on a saved mapping."""
+    inputs_dir = _inputs_dir()
+    path = inputs_dir / filename
+    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
+        raise HTTPException(status_code=404, detail="File not found")
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        ctx = _mapping_context(session, user.id, filename, path)
+    return templates.TemplateResponse(request, "_header_mapping.html", ctx)
+
+
+@app.post("/imports/{filename}/mapping", response_class=HTMLResponse)
+async def save_mapping(request: Request, filename: str) -> HTMLResponse:
+    """Save a header mapping for the file's signature. Form fields:
+    `signature` (the resolution's signature) and one `map:<file_header>`
+    field per unrecognized header. Returns the re-rendered file card."""
+    inputs_dir = _inputs_dir()
+    path = inputs_dir / filename
+    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    form = await request.form()
+    signature = (form.get("signature") or "").strip()
+    if not signature:
+        raise HTTPException(status_code=400, detail="Missing signature.")
+    mapping: dict[str, str] = {}
+    for k, v in form.multi_items():
+        if not k.startswith("map:"):
+            continue
+        file_header = k[4:]
+        field = (v or "").strip()
+        if field and field in ALL_FIELDS:
+            mapping[file_header] = field
+    if not mapping:
+        raise HTTPException(
+            status_code=400, detail="At least one column must be mapped."
+        )
+
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        existing = _lookup_saved_mapping(session, user.id, signature)
+        if existing is not None:
+            existing.mapping = mapping
+        else:
+            session.add(
+                HeaderMapping(
+                    user_id=user.id, signature=signature, mapping=mapping
+                )
+            )
+        session.commit()
+        entry = _build_entry(session, user.id, path)
+    return templates.TemplateResponse(
+        request, "_file_card.html", {"entry": entry}
+    )
+
+
+@app.delete("/imports/mappings/{mapping_id}", response_class=HTMLResponse)
+def forget_mapping(
+    request: Request,
+    mapping_id: int,
+    filename: Optional[str] = None,
+) -> HTMLResponse:
+    """Delete a saved mapping. If `filename` is given, return the
+    re-rendered file card so the user sees the new state inline; otherwise
+    return empty (the caller HTMX-swaps out the row, e.g. on /profile)."""
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        mapping = session.get(HeaderMapping, mapping_id)
+        if mapping is not None and mapping.user_id == user.id:
+            session.delete(mapping)
+            session.commit()
+        if filename:
+            inputs_dir = _inputs_dir()
+            path = inputs_dir / filename
+            if path.exists() and path.is_file() and path.parent == inputs_dir:
+                entry = _build_entry(session, user.id, path)
+                return templates.TemplateResponse(
+                    request, "_file_card.html", {"entry": entry}
+                )
+    return HTMLResponse("")
 
 
 @app.delete("/imports/runs/{run_id}", response_class=HTMLResponse)
@@ -1719,6 +1991,13 @@ def logout(request: Request) -> RedirectResponse:
 def profile_page(request: Request, saved: int = 0, error: str = "") -> HTMLResponse:
     with SessionLocal() as session:
         user = _current_user(session, request)
+        mappings = list(
+            session.scalars(
+                select(HeaderMapping)
+                .where(HeaderMapping.user_id == user.id)
+                .order_by(HeaderMapping.created_at.desc())
+            )
+        )
         return templates.TemplateResponse(
             request,
             "profile.html",
@@ -1726,6 +2005,7 @@ def profile_page(request: Request, saved: int = 0, error: str = "") -> HTMLRespo
                 "user": user,
                 "saved": bool(saved),
                 "error": error or None,
+                "header_mappings": mappings,
             },
         )
 

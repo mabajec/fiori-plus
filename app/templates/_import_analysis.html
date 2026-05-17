@@ -28,6 +28,17 @@
               <span class="ml-1 text-indigo-600 dark:text-indigo-400">(new project — every row is new)</span>
             {% endif %}
           </p>
+          {% if analysis.normalization_log or analysis.override_log %}
+            <p class="text-xs text-slate-400 dark:text-slate-500 mt-1">
+              Header resolution:
+              {% for raw, canonical in analysis.normalization_log %}
+                <span class="inline-flex items-center gap-0.5"><span class="font-mono">{{ raw }}</span> → <span class="font-mono">{{ canonical }}</span> <span class="text-[10px] uppercase tracking-wider text-slate-400 dark:text-slate-500">normalized</span></span>{% if not loop.last or analysis.override_log %}; {% endif %}
+              {% endfor %}
+              {% for raw, canonical in analysis.override_log %}
+                <span class="inline-flex items-center gap-0.5"><span class="font-mono">{{ raw }}</span> → <span class="font-mono">{{ canonical }}</span> <span class="text-[10px] uppercase tracking-wider text-indigo-500 dark:text-indigo-400">via mapping</span></span>{% if not loop.last %}; {% endif %}
+              {% endfor %}
+            </p>
+          {% endif %}
         </div>
         <button type="button"
                 onclick="this.closest('[id^=\'analysis-\']').innerHTML='';"

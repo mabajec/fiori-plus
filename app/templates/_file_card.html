@@ -1,14 +1,37 @@
 {# A single file card. Swapped via HTMX on each action. #}
 <div id="file-card-{{ entry.id }}"
      class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 hover:shadow-sm dark:hover:shadow-slate-900/50 transition-shadow">
-  {% if entry.import_run %}
+  {% if entry.needs_mapping %}
+    <div class="flex items-center gap-3 mb-2">
+      <span class="font-semibold truncate">{{ entry.filename }}</span>
+      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 text-xs font-medium">
+        <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Needs column mapping
+      </span>
+    </div>
+    <div class="text-xs text-slate-500 dark:text-slate-400 mb-3">
+      {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
+    </div>
+    <p class="text-sm text-slate-600 dark:text-slate-300 mb-3">
+      Some columns in this file don't match the expected names. Map them once and we'll remember the mapping for future files with the same column set.
+    </p>
+    <button type="button"
+            hx-get="/imports/{{ entry.filename|urlencode }}/mapping"
+            hx-target="#file-card-{{ entry.id }}"
+            hx-swap="outerHTML"
+            class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors">
+      Map columns
+    </button>
+  {% elif entry.import_run %}
     <div class="flex items-center gap-5">
       <div class="flex-1 min-w-0">
-        <div class="flex items-center gap-3 mb-1">
+        <div class="flex items-center gap-3 mb-1 flex-wrap">
           <span class="font-semibold truncate">{{ entry.filename }}</span>
           <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
             <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Imported
           </span>
+          {% if entry.saved_mapping_id %}
+            {% include "_saved_mapping_badge.html" %}
+          {% endif %}
         </div>
         <div class="text-xs text-slate-500 dark:text-slate-400">
           {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
@@ -40,11 +63,14 @@
     </div>
     <div class="text-sm text-red-600 dark:text-red-400">{{ entry.error }}</div>
   {% else %}
-    <div class="flex items-center gap-3 mb-3">
+    <div class="flex items-center gap-3 mb-3 flex-wrap">
       <span class="font-semibold truncate">{{ entry.filename }}</span>
       <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 text-xs font-medium">
         <span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>New
       </span>
+      {% if entry.saved_mapping_id %}
+        {% include "_saved_mapping_badge.html" %}
+      {% endif %}
     </div>
     <div class="text-xs text-slate-500 dark:text-slate-400 mb-3">
       {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
