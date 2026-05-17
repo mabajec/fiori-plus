@@ -257,8 +257,16 @@ def _natural_key(rec) -> tuple:
     )
 
 
+def fingerprint(rec) -> str:
+    """Short, stable fingerprint of a row's natural key. Used as the
+    checkbox value in the analyze panel so the apply step can re-identify
+    rows even after the file or DB rows are re-fetched."""
+    return hashlib.sha256(repr(_natural_key(rec)).encode()).hexdigest()[:16]
+
+
 def _record_to_dict(t: Transaction) -> dict:
     return {
+        "id": t.id,
         "document_number": t.document_number,
         "account_code": t.account_code,
         "account_text": t.account_text,
@@ -312,17 +320,43 @@ def import_file(
     name_resolver: Callable[[str], str],
     encoding: str = DEFAULT_ENCODING,
     mode: str = "add",
+    new_fingerprints: set[str] | None = None,
+    missing_ids: set[int] | None = None,
 ) -> ImportResult:
+    """Apply a file to the DB.
+
+    Default (non-selective) semantics:
+      - mode='add'     → insert every new row from the file; skip duplicates.
+      - mode='replace' → delete every row in the file's date range, then insert
+                         every row from the file.
+
+    Selective semantics (caller passes new_fingerprints and/or missing_ids,
+    typically from the analyze view's checkboxes):
+      - mode='add'     → insert only rows whose fingerprint is in
+                         new_fingerprints. missing_ids is ignored.
+      - mode='replace' → insert only rows whose fingerprint is in
+                         new_fingerprints, AND delete only DB rows whose id is
+                         in missing_ids. Existing (in both) rows are untouched.
+                         This is "surgical replace" — much narrower than the
+                         period-wide delete of the non-selective form.
+
+    The file-hash dedup short-circuit only fires in non-selective mode; with
+    a selection the user is explicitly picking rows and may legitimately
+    re-apply parts of the same file.
+    """
     if mode not in ("add", "replace"):
         raise ValueError(f"Unknown mode {mode!r}; expected 'add' or 'replace'.")
+
+    selective = new_fingerprints is not None or missing_ids is not None
 
     file_hash, records, pps_element, period_start, period_end = _parse_and_validate(
         path, encoding
     )
 
-    # For "add", skip if we've already ingested this exact file. For "replace"
-    # the user is asking to overwrite, so re-running on the same file is fine.
-    if mode == "add":
+    # For "add" with no selection, skip if we've already ingested this exact
+    # file. For "replace" the user is asking to overwrite, so re-running on the
+    # same file is fine. With a selection the user is explicit; skip the check.
+    if mode == "add" and not selective:
         prior = session.scalar(
             select(ImportRun)
             .where(
@@ -351,16 +385,30 @@ def import_file(
     project = ensure_project(session, user_id, pps_element, name_resolver)
 
     rows_deleted = 0
-    if mode == "replace":
-        # Delete the project's existing rows in the file's date range; outside
-        # that range is left alone so partial-year exports don't nuke other
-        # months.
+    if mode == "replace" and not selective:
+        # Period-wide replace: wipe the project's rows in the file's date
+        # range, then re-insert everything in the file. Rows outside the range
+        # are left alone so partial-year exports don't nuke other months.
         from sqlalchemy import delete as sql_delete
 
         result = session.execute(
             sql_delete(Transaction).where(
                 Transaction.project_id == project.id,
                 Transaction.posting_date.between(period_start, period_end),
+            )
+        )
+        rows_deleted = result.rowcount or 0
+        session.flush()
+    elif mode == "replace" and selective and missing_ids:
+        # Surgical replace: only delete the DB rows the user ticked in the
+        # Missing list. Scope by project to avoid stray ids from another
+        # project sneaking through.
+        from sqlalchemy import delete as sql_delete
+
+        result = session.execute(
+            sql_delete(Transaction).where(
+                Transaction.project_id == project.id,
+                Transaction.id.in_(missing_ids),
             )
         )
         rows_deleted = result.rowcount or 0
@@ -383,6 +431,12 @@ def import_file(
 
     rows_imported = 0
     for rec in records:
+        if selective:
+            # Only insert rows whose fingerprint was ticked. An empty set means
+            # "ticked nothing" (e.g. unticked every New row); we still honor it
+            # and insert nothing.
+            if not new_fingerprints or fingerprint(rec) not in new_fingerprints:
+                continue
         key = _natural_key(rec)
         if key in seen_keys:
             continue
@@ -438,7 +492,13 @@ def analyze_file(
         )
     )
 
-    file_by_key: dict[tuple, dict] = {_natural_key(r): r for r in records}
+    # Attach a stable fingerprint to each parsed file row so the analyze
+    # template can use it as the checkbox value and apply can re-identify
+    # rows after a fresh re-parse.
+    def with_fp(r: dict) -> dict:
+        return {**r, "fp": fingerprint(r)}
+
+    file_by_key: dict[tuple, dict] = {_natural_key(r): with_fp(r) for r in records}
 
     if project is None:
         # Brand-new project — everything in the file is "new".
@@ -450,7 +510,7 @@ def analyze_file(
             file_sha256=file_hash,
             period_start=period_start,
             period_end=period_end,
-            new_records=sorted(records, key=sort_key),
+            new_records=sorted(file_by_key.values(), key=sort_key),
             existing_records=[],
             missing_records=[],
         )

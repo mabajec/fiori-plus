@@ -253,11 +253,12 @@ def imports_page(request: Request) -> HTMLResponse:
 
 
 @app.post("/imports/{filename}", response_class=HTMLResponse)
-def do_import(
+async def do_import(
     request: Request,
     filename: str,
     name: Optional[str] = Form(default=None),
     mode: str = Form(default="add"),
+    selective: Optional[str] = Form(default=None),
 ) -> HTMLResponse:
     if mode not in ("add", "replace"):
         raise HTTPException(status_code=400, detail="Invalid mode.")
@@ -266,6 +267,20 @@ def do_import(
     path = inputs_dir / filename
     if not path.exists() or not path.is_file() or path.parent != inputs_dir:
         raise HTTPException(status_code=404, detail="File not found")
+
+    new_fingerprints: Optional[set[str]] = None
+    missing_ids: Optional[set[int]] = None
+    if selective:
+        # Pull repeated checkbox fields from the raw form. FastAPI's Form()
+        # binds only single values; getlist() is what we need here.
+        form = await request.form()
+        new_fingerprints = {v for v in form.getlist("new_fp") if v}
+        missing_ids = set()
+        for v in form.getlist("missing_id"):
+            try:
+                missing_ids.add(int(v))
+            except (TypeError, ValueError):
+                continue
 
     with SessionLocal() as session:
         user = _current_user(session, request)
@@ -286,6 +301,8 @@ def do_import(
                 user_id=user.id,
                 name_resolver=name_resolver,
                 mode=mode,
+                new_fingerprints=new_fingerprints,
+                missing_ids=missing_ids,
             )
         except _NeedsName as exc:
             entry = FileEntry(
