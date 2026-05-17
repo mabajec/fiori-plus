@@ -15,7 +15,45 @@ from app.models import ImportRun, Project, Transaction
 
 
 HEADER_FIRST_CELL = "PPS element"
+# Native export from the source system is Mac Central European. Files
+# round-tripped through Excel, LibreOffice or most text editors usually come
+# back as UTF-8 (often with BOM) or, on Windows, CP1250. We try the native
+# encoding first and fall back to the others so a manually-edited file still
+# imports cleanly.
 DEFAULT_ENCODING = "mac_latin2"
+CANDIDATE_ENCODINGS: tuple[str, ...] = (
+    "mac_latin2",
+    "utf-8-sig",
+    "utf-8",
+    "cp1250",
+)
+
+
+def detect_encoding(path: Path) -> str:
+    """Pick the first candidate encoding under which the header row decodes
+    AND yields all required column names. Returns DEFAULT_ENCODING if nothing
+    fits, so downstream parsing still raises a meaningful error.
+
+    Note: mac_latin2 / cp1250 are single-byte encodings, so they never raise
+    UnicodeDecodeError — we have to validate semantically (the required-field
+    columns map cleanly) rather than just structurally."""
+    for enc in CANDIDATE_ENCODINGS:
+        try:
+            with open(path, encoding=enc) as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            continue
+        for raw in text.splitlines():
+            cells = raw.split("\t")
+            while cells and cells[0] == "":
+                cells.pop(0)
+            if not cells or cells[0].strip() != HEADER_FIRST_CELL:
+                continue
+            mapped = {COLUMN_MAP[c.strip()] for c in cells if c.strip() in COLUMN_MAP}
+            if REQUIRED_FIELDS.issubset(mapped):
+                return enc
+            break  # found the header row but it doesn't map; try next encoding
+    return DEFAULT_ENCODING
 
 # Source-system column header → field name we use internally.
 COLUMN_MAP: dict[str, str] = {
@@ -108,12 +146,14 @@ def _build_field_map(header_cells: list[str]) -> dict[int, str]:
     return field_map
 
 
-def peek_pps_element(path: Path, encoding: str = DEFAULT_ENCODING) -> str:
+def peek_pps_element(path: Path, encoding: str | None = None) -> str:
     """Return the PPS element from the first data row, without parsing the rest.
 
     Used by the UI to decide whether the project is already known (no name
     prompt needed) before kicking off a full import.
     """
+    if encoding is None:
+        encoding = detect_encoding(path)
     for rec in read_records(path, encoding=encoding):
         pps = rec.get("pps_element")
         if pps:
@@ -121,13 +161,15 @@ def peek_pps_element(path: Path, encoding: str = DEFAULT_ENCODING) -> str:
     raise ValueError(f"No data rows found in {path}.")
 
 
-def read_footer_total(path: Path, encoding: str = DEFAULT_ENCODING) -> Decimal:
+def read_footer_total(path: Path, encoding: str | None = None) -> Decimal:
     """Return the total amount from the `*` footer row.
 
     Every export from the source system ends with a `* | ... | total` row.
     Comparing that figure against the sum of parsed rows is our safety net
     against silent parsing or encoding errors.
     """
+    if encoding is None:
+        encoding = detect_encoding(path)
     with open(path, encoding=encoding) as f:
         text = f.read()
     for raw in text.splitlines():
@@ -153,7 +195,7 @@ def read_footer_total(path: Path, encoding: str = DEFAULT_ENCODING) -> Decimal:
 
 
 def read_records(
-    path: Path, encoding: str = DEFAULT_ENCODING
+    path: Path, encoding: str | None = None
 ) -> Iterator[dict]:
     """Yield one dict per data row, with string values mapped by column name.
 
@@ -162,6 +204,8 @@ def read_records(
     resolved from the actual header row in each file. Skips preamble lines
     before the header and stops at a `*` totals footer.
     """
+    if encoding is None:
+        encoding = detect_encoding(path)
     with open(path, encoding=encoding) as f:
         text = f.read()
 
@@ -280,11 +324,13 @@ def _record_to_dict(t: Transaction) -> dict:
 
 
 def _parse_and_validate(
-    path: Path, encoding: str
+    path: Path, encoding: str | None
 ) -> tuple[str, list[dict], str, date, date]:
     """Parse + validate a file. Returns (file_hash, records, pps_element,
     period_start, period_end). Raises ValueError on any structural problem
     or footer-total mismatch."""
+    if encoding is None:
+        encoding = detect_encoding(path)
     file_hash = sha256_file(path)
     records = [parse_record(r) for r in read_records(path, encoding=encoding)]
     if not records:
@@ -318,7 +364,7 @@ def import_file(
     path: Path,
     user_id: int,
     name_resolver: Callable[[str], str],
-    encoding: str = DEFAULT_ENCODING,
+    encoding: str | None = None,
     mode: str = "add",
     new_fingerprints: set[str] | None = None,
     missing_ids: set[int] | None = None,
@@ -477,7 +523,7 @@ def analyze_file(
     session: Session,
     path: Path,
     user_id: int,
-    encoding: str = DEFAULT_ENCODING,
+    encoding: str | None = None,
 ) -> ImportAnalysis:
     """Compute a diff between the file and the DB for the file's date range.
     No DB writes; doesn't create a project if it's new."""

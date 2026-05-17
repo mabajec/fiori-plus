@@ -55,6 +55,7 @@ templates.env.globals["date"] = date
 
 @dataclass
 class ImportRunView:
+    id: int
     imported_at: datetime
     filename: str
     project_name: str
@@ -152,6 +153,7 @@ def _current_user(session: Session, request: Request) -> User:
 def _import_run_view(session: Session, run: ImportRun) -> ImportRunView:
     project = session.get(Project, run.project_id) if run.project_id else None
     return ImportRunView(
+        id=run.id,
         imported_at=run.imported_at,
         filename=run.filename,
         project_name=project.name if project else "<deleted>",
@@ -382,6 +384,24 @@ def analyze_import(request: Request, filename: str) -> HTMLResponse:
             "error": None,
         },
     )
+
+
+@app.delete("/imports/runs/{run_id}", response_class=HTMLResponse)
+def delete_import_run(request: Request, run_id: int) -> HTMLResponse:
+    """Remove a single ImportRun audit entry. Transactions inserted by that
+    run are NOT removed — the run is bookkeeping only. Users use this to tidy
+    up rows whose source file is no longer in inputs."""
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        run = session.get(ImportRun, run_id)
+        if run is None or run.user_id != user.id:
+            # Treat missing/foreign rows as already-gone for the UI's purposes;
+            # HTMX will just remove the row.
+            return HTMLResponse("")
+        session.delete(run)
+        session.commit()
+    # Empty body + outerHTML swap on the <tr> removes the row from the table.
+    return HTMLResponse("")
 
 
 class _NeedsName(Exception):
