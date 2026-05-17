@@ -1,8 +1,10 @@
 {# Header mapping panel. Two entry points use this template:
    1. File card's "Map columns" call-to-action (file's headers don't parse)
    2. File card's "Edit" link next to a "Using saved mapping" badge
-   Both submit to POST /imports/{filename}/mapping. #}
-<div id="mapping-panel-{{ entry_id }}"
+   Both submit to POST /imports/{filename}/mapping.
+   The root keeps the file-card id so the panel can be swapped back and
+   forth with the card via the same hx-target. #}
+<div id="file-card-{{ entry_id }}"
      class="bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700 rounded-xl p-5">
   <div class="flex items-start justify-between mb-3">
     <div>
