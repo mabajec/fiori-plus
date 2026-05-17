@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -155,6 +155,29 @@ def _inputs_dir() -> Path:
     return Path(settings.inputs_dir).resolve()
 
 
+def _user_inputs_dir(user_id: int) -> Path:
+    """Per-user subdirectory under the inputs root. Each user only sees their
+    own uploads, so payroll files from one project coordinator don't leak to
+    another. Created on demand so a brand-new user's imports page doesn't
+    trip over a missing path."""
+    d = _inputs_dir() / str(user_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _resolve_user_file(user_id: int, filename: str) -> Path:
+    """Look up `filename` in the user's inputs directory, with the same
+    safety check every endpoint needs: the resolved path must live directly
+    under the user's folder (no path-traversal escapes), and must exist.
+
+    Raises HTTPException(404) on miss."""
+    user_dir = _user_inputs_dir(user_id)
+    path = user_dir / filename
+    if not path.exists() or not path.is_file() or path.parent != user_dir:
+        raise HTTPException(status_code=404, detail="File not found")
+    return path
+
+
 def _current_user(session: Session, request: Request) -> User:
     user_id = request.session.get("auth_user_id")
     if not user_id:
@@ -298,14 +321,13 @@ def root() -> RedirectResponse:
 
 @app.get("/imports", response_class=HTMLResponse)
 def imports_page(request: Request) -> HTMLResponse:
-    inputs_dir = _inputs_dir()
     with SessionLocal() as session:
         user = _current_user(session, request)
+        user_dir = _user_inputs_dir(user.id)
 
         entries: list[FileEntry] = []
-        if inputs_dir.exists():
-            for path in sorted(inputs_dir.glob("*.txt")):
-                entries.append(_build_entry(session, user.id, path))
+        for path in sorted(user_dir.glob("*.txt")):
+            entries.append(_build_entry(session, user.id, path))
 
         runs = (
             session.scalars(
@@ -321,12 +343,191 @@ def imports_page(request: Request) -> HTMLResponse:
         request,
         "imports.html",
         {
-            "inputs_dir": str(inputs_dir),
+            "inputs_dir": str(user_dir),
             "entries": entries,
             "runs": run_views,
             "oob": False,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# File upload — multipart POST into the user's inputs subfolder.
+# Declared BEFORE the dynamic /imports/{filename} routes so the static
+# /imports/upload path matches first.
+# ---------------------------------------------------------------------------
+
+
+import re as _re
+import secrets as _secrets
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap — payroll exports are tiny
+ALLOWED_UPLOAD_SUFFIX = ".txt"
+# Conservative allowlist: letters, digits, dot, hyphen, underscore, space,
+# parentheses. Anything else is rejected up-front so the OS-level filename
+# stays safe and predictable.
+_UPLOAD_NAME_RE = _re.compile(r"^[A-Za-z0-9._\- ()]+$")
+
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Strip any directory part and validate against the allowlist. Raises
+    HTTPException(400) on disallowed input."""
+    base = Path(name or "").name
+    if not base or base in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    if Path(base).suffix.lower() != ALLOWED_UPLOAD_SUFFIX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only {ALLOWED_UPLOAD_SUFFIX} files are accepted.",
+        )
+    if not _UPLOAD_NAME_RE.match(base):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Filename can contain letters, digits, spaces, dots, "
+                "hyphens, underscores, and parentheses only."
+            ),
+        )
+    return base
+
+
+def _upload_stash_dir(user_id: int) -> Path:
+    """Hidden subdirectory under the user's inputs folder where pending
+    uploads wait for an overwrite confirmation. Files in here are not
+    listed on /imports."""
+    d = _user_inputs_dir(user_id) / ".uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _validate_upload_content(path: Path) -> None:
+    """Confirm a freshly-uploaded file at least has a recognisable header
+    row. NeedsHeaderMapping is fine here — the user can map columns later;
+    that's the whole point of the mapping flow. Anything else (no header
+    row, decode failure, etc.) is hard junk; raise ValueError."""
+    try:
+        peek_pps_element(path)
+    except NeedsHeaderMapping:
+        return
+    # peek_pps_element raises on no header row / no data rows; let those
+    # propagate as-is so the caller can show the actual message.
+
+
+def _render_upload_success(
+    request: Request, user_id: int, message: str
+) -> HTMLResponse:
+    """Success response: result alert into #upload-result (innerHTML swap) +
+    OOB refresh of the full #files-list so the new card appears at once."""
+    with SessionLocal() as session:
+        user_dir = _user_inputs_dir(user_id)
+        entries: list[FileEntry] = []
+        for p in sorted(user_dir.glob("*.txt")):
+            entries.append(_build_entry(session, user_id, p))
+    result_html = templates.get_template("_upload_result.html").render(
+        {"request": request, "message": message, "error": False}
+    )
+    files_html = templates.get_template("_files_list.html").render(
+        {"request": request, "entries": entries, "oob": True}
+    )
+    return HTMLResponse(result_html + files_html)
+
+
+@app.post("/imports/upload", response_class=HTMLResponse)
+async def upload_file(
+    request: Request,
+    file: UploadFile = File(...),
+) -> HTMLResponse:
+    safe_name = _sanitize_upload_filename(file.filename or "")
+    # Cap at the limit + 1 byte so we can detect oversize without slurping
+    # the whole thing.
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        return templates.TemplateResponse(
+            request, "_upload_result.html",
+            {
+                "message": (
+                    f"File too large — max {MAX_UPLOAD_BYTES // 1024 // 1024} MB."
+                ),
+                "error": True,
+            },
+        )
+    if not data:
+        return templates.TemplateResponse(
+            request, "_upload_result.html",
+            {"message": "Empty file.", "error": True},
+        )
+
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        user_dir = _user_inputs_dir(user.id)
+        dest = user_dir / safe_name
+
+        # Stash to a temp file first so we can validate without clobbering.
+        stash_dir = _upload_stash_dir(user.id)
+        token = _secrets.token_hex(8)
+        stash_path = stash_dir / f"{token}.upload"
+        stash_path.write_bytes(data)
+        try:
+            _validate_upload_content(stash_path)
+        except Exception as exc:
+            stash_path.unlink(missing_ok=True)
+            return templates.TemplateResponse(
+                request, "_upload_result.html",
+                {"message": f"File rejected: {exc}", "error": True},
+            )
+
+        if dest.exists():
+            # Conflict — keep the stash and ask the user to confirm overwrite.
+            return templates.TemplateResponse(
+                request, "_upload_confirm.html",
+                {"filename": safe_name, "token": token},
+            )
+
+        stash_path.replace(dest)
+        uid = user.id
+    return _render_upload_success(
+        request, uid, message=f"Uploaded {safe_name}."
+    )
+
+
+@app.post("/imports/upload/{token}/confirm", response_class=HTMLResponse)
+def upload_confirm(
+    request: Request, token: str, filename: str = Form(...)
+) -> HTMLResponse:
+    """Finalize a stashed upload (overwriting the existing file)."""
+    safe_name = _sanitize_upload_filename(filename)
+    if not _re.fullmatch(r"[a-f0-9]{16}", token):
+        raise HTTPException(status_code=400, detail="Invalid token.")
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        stash_path = _upload_stash_dir(user.id) / f"{token}.upload"
+        if not stash_path.exists():
+            return templates.TemplateResponse(
+                request, "_upload_result.html",
+                {
+                    "message": "Upload expired — please pick the file again.",
+                    "error": True,
+                },
+            )
+        dest = _user_inputs_dir(user.id) / safe_name
+        stash_path.replace(dest)
+        uid = user.id
+    return _render_upload_success(
+        request, uid, message=f"Replaced {safe_name}."
+    )
+
+
+@app.delete("/imports/upload/{token}", response_class=HTMLResponse)
+def upload_cancel(request: Request, token: str) -> HTMLResponse:
+    """Discard a stashed upload (user clicked Cancel on the confirm
+    dialog)."""
+    if not _re.fullmatch(r"[a-f0-9]{16}", token):
+        raise HTTPException(status_code=400, detail="Invalid token.")
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        stash_path = _upload_stash_dir(user.id) / f"{token}.upload"
+        stash_path.unlink(missing_ok=True)
+    return HTMLResponse("")
 
 
 @app.post("/imports/{filename}", response_class=HTMLResponse)
@@ -339,11 +540,6 @@ async def do_import(
 ) -> HTMLResponse:
     if mode not in ("add", "replace"):
         raise HTTPException(status_code=400, detail="Invalid mode.")
-
-    inputs_dir = _inputs_dir()
-    path = inputs_dir / filename
-    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
-        raise HTTPException(status_code=404, detail="File not found")
 
     new_fingerprints: Optional[set[str]] = None
     missing_ids: Optional[set[int]] = None
@@ -361,6 +557,7 @@ async def do_import(
 
     with SessionLocal() as session:
         user = _current_user(session, request)
+        path = _resolve_user_file(user.id, filename)
 
         resolved_name: Optional[str] = name.strip() if name else None
 
@@ -446,13 +643,9 @@ def analyze_import(request: Request, filename: str) -> HTMLResponse:
     date range. No DB writes."""
     from app.importer import analyze_file
 
-    inputs_dir = _inputs_dir()
-    path = inputs_dir / filename
-    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
-        raise HTTPException(status_code=404, detail="File not found")
-
     with SessionLocal() as session:
         user = _current_user(session, request)
+        path = _resolve_user_file(user.id, filename)
         overrides, saved, blocking = _resolve_for_file(session, user.id, path)
         if blocking is not None:
             # Can't analyze without a working header map. Surface the prompt
@@ -560,12 +753,9 @@ def _mapping_context(
 def render_file_card(request: Request, filename: str) -> HTMLResponse:
     """Re-render a single file card. Used by Cancel buttons in the mapping
     panel to swap the panel back to whatever state the card was in."""
-    inputs_dir = _inputs_dir()
-    path = inputs_dir / filename
-    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
-        raise HTTPException(status_code=404, detail="File not found")
     with SessionLocal() as session:
         user = _current_user(session, request)
+        path = _resolve_user_file(user.id, filename)
         entry = _build_entry(session, user.id, path)
     return templates.TemplateResponse(
         request, "_file_card.html", {"entry": entry}
@@ -577,12 +767,9 @@ def show_mapping_panel(request: Request, filename: str) -> HTMLResponse:
     """Render the header mapping panel for a file. Used both when the file's
     headers don't auto-resolve (initial mapping) and when the user clicks
     Edit on a saved mapping."""
-    inputs_dir = _inputs_dir()
-    path = inputs_dir / filename
-    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
-        raise HTTPException(status_code=404, detail="File not found")
     with SessionLocal() as session:
         user = _current_user(session, request)
+        path = _resolve_user_file(user.id, filename)
         ctx = _mapping_context(session, user.id, filename, path)
     return templates.TemplateResponse(request, "_header_mapping.html", ctx)
 
@@ -592,11 +779,6 @@ async def save_mapping(request: Request, filename: str) -> HTMLResponse:
     """Save a header mapping for the file's signature. Form fields:
     `signature` (the resolution's signature) and one `map:<file_header>`
     field per unrecognized header. Returns the re-rendered file card."""
-    inputs_dir = _inputs_dir()
-    path = inputs_dir / filename
-    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
-        raise HTTPException(status_code=404, detail="File not found")
-
     form = await request.form()
     signature = (form.get("signature") or "").strip()
     if not signature:
@@ -616,6 +798,7 @@ async def save_mapping(request: Request, filename: str) -> HTMLResponse:
 
     with SessionLocal() as session:
         user = _current_user(session, request)
+        path = _resolve_user_file(user.id, filename)
         existing = _lookup_saved_mapping(session, user.id, signature)
         if existing is not None:
             existing.mapping = mapping
@@ -648,9 +831,9 @@ def forget_mapping(
             session.delete(mapping)
             session.commit()
         if filename:
-            inputs_dir = _inputs_dir()
-            path = inputs_dir / filename
-            if path.exists() and path.is_file() and path.parent == inputs_dir:
+            user_dir = _user_inputs_dir(user.id)
+            path = user_dir / filename
+            if path.exists() and path.is_file() and path.parent == user_dir:
                 entry = _build_entry(session, user.id, path)
                 return templates.TemplateResponse(
                     request, "_file_card.html", {"entry": entry}

@@ -1,24 +1,40 @@
 {% extends "base.html" %}
 {% block title %}Imports — Fiori{% endblock %}
 {% block content %}
-<div class="mb-8">
+<div class="mb-6">
   <h1 class="text-2xl font-semibold mb-1">Imports</h1>
   <p class="text-sm text-slate-500 dark:text-slate-400">
-    Files scanned from <code class="bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-xs">{{ inputs_dir }}</code>
+    Files in <code class="bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-xs">{{ inputs_dir }}</code>
+    — only you can see them.
   </p>
 </div>
 
-{% if not entries %}
-  <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 mb-12 text-sm text-slate-500 dark:text-slate-400">
-    No files found in <code class="bg-slate-100 dark:bg-slate-700 px-1.5 py-0.5 rounded">{{ inputs_dir }}</code>. Drop a TSV export there and reload.
-  </div>
-{% else %}
-  <div class="space-y-3 mb-12">
-    {% for entry in entries %}
-      {% include "_file_card.html" %}
-    {% endfor %}
-  </div>
-{% endif %}
+<section class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 mb-6">
+  <h2 class="text-base font-semibold mb-3">Upload a file</h2>
+  <form hx-post="/imports/upload"
+        hx-target="#upload-result"
+        hx-swap="innerHTML"
+        hx-encoding="multipart/form-data"
+        hx-on::after-request="if(event.detail.successful) this.reset()"
+        class="flex flex-wrap items-center gap-2">
+    <input type="file" name="file" accept=".txt" required
+           class="flex-1 min-w-[16rem] text-sm text-slate-700 dark:text-slate-200
+                  file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0
+                  file:bg-slate-100 dark:file:bg-slate-700 file:text-slate-700 dark:file:text-slate-200
+                  file:text-xs file:font-medium hover:file:bg-slate-200 dark:hover:file:bg-slate-600
+                  file:cursor-pointer cursor-pointer">
+    <button type="submit"
+            class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors">
+      Upload
+    </button>
+  </form>
+  <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">
+    Only <code>.txt</code> exports. We'll check the file has a recognisable header before storing it.
+  </p>
+  <div id="upload-result"></div>
+</section>
+
+{% include "_files_list.html" %}
 
 {% include "_runs_table.html" %}
 {% endblock %}

@@ -1,0 +1,15 @@
+{# File-cards section. Used both inline on first render and as an OOB
+   target after upload/import to refresh the list without a full reload. #}
+{% if oob %}<template>{% endif %}
+<div id="files-list"{% if oob %} hx-swap-oob="true"{% endif %} class="space-y-3 mb-12">
+  {% if not entries %}
+    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6 text-sm text-slate-500 dark:text-slate-400">
+      No files yet. Upload one above, or drop a TSV export onto your inputs folder.
+    </div>
+  {% else %}
+    {% for entry in entries %}
+      {% include "_file_card.html" %}
+    {% endfor %}
+  {% endif %}
+</div>
+{% if oob %}</template>{% endif %}

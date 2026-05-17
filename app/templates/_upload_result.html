@@ -1,0 +1,13 @@
+{# Inner content of the #upload-result slot — swapped via innerHTML by
+   the upload form / confirm / cancel actions. #}
+{% if message %}
+  {% if error %}
+    <div class="mt-2 p-3 rounded-lg bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-sm text-red-700 dark:text-red-300">
+      {{ message }}
+    </div>
+  {% else %}
+    <div class="mt-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 border border-emerald-200 dark:border-emerald-800 text-sm text-emerald-700 dark:text-emerald-300">
+      {{ message }}
+    </div>
+  {% endif %}
+{% endif %}
