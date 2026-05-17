@@ -49,8 +49,25 @@ class ImportResult:
     pps_element: str
     rows_imported: int
     rows_skipped: int
+    rows_deleted: int
+    mode: str               # "add" or "replace"
     file_sha256: str
     duplicate_file: bool
+
+
+@dataclass
+class ImportAnalysis:
+    """Diff between a file and what the DB already has, for the file's
+    own date range. No side effects — purely informational."""
+    project_id: int
+    project_name: str
+    pps_element: str
+    file_sha256: str
+    period_start: date
+    period_end: date
+    new_records: list[dict]              # in file, not in DB
+    existing_records: list[dict]         # in both (natural key matches)
+    missing_records: list[dict]          # in DB for period, not in file
 
 
 def sha256_file(path: Path) -> str:
@@ -218,32 +235,49 @@ def ensure_project(
     return proj
 
 
-def import_file(
-    session: Session,
-    path: Path,
-    user_id: int,
-    name_resolver: Callable[[str], str],
-    encoding: str = DEFAULT_ENCODING,
-) -> ImportResult:
-    file_hash = sha256_file(path)
-
-    prior = session.scalar(
-        select(ImportRun)
-        .where(ImportRun.file_sha256 == file_hash, ImportRun.user_id == user_id)
-        .order_by(ImportRun.imported_at.desc())
-    )
-    if prior is not None:
-        proj = session.get(Project, prior.project_id) if prior.project_id else None
-        return ImportResult(
-            project_id=prior.project_id or 0,
-            project_name=proj.name if proj else "<deleted>",
-            pps_element=proj.pps_element if proj else "",
-            rows_imported=0,
-            rows_skipped=0,
-            file_sha256=file_hash,
-            duplicate_file=True,
+def _natural_key(rec) -> tuple:
+    """The tuple matching the UNIQUE constraint on transactions. Works on
+    either a parsed dict or a Transaction ORM row."""
+    if isinstance(rec, dict):
+        return (
+            rec["document_number"],
+            rec["account_code"],
+            rec["amount"],
+            rec["posting_date"],
+            rec.get("employee"),
+            rec.get("text"),
         )
+    return (
+        rec.document_number,
+        rec.account_code,
+        rec.amount,
+        rec.posting_date,
+        rec.employee,
+        rec.text,
+    )
 
+
+def _record_to_dict(t: Transaction) -> dict:
+    return {
+        "document_number": t.document_number,
+        "account_code": t.account_code,
+        "account_text": t.account_text,
+        "amount": t.amount,
+        "posting_date": t.posting_date,
+        "employee": t.employee,
+        "text": t.text,
+        "source": t.source,
+        "year": t.year,
+    }
+
+
+def _parse_and_validate(
+    path: Path, encoding: str
+) -> tuple[str, list[dict], str, date, date]:
+    """Parse + validate a file. Returns (file_hash, records, pps_element,
+    period_start, period_end). Raises ValueError on any structural problem
+    or footer-total mismatch."""
+    file_hash = sha256_file(path)
     records = [parse_record(r) for r in read_records(path, encoding=encoding)]
     if not records:
         raise ValueError("File contains no data rows.")
@@ -265,21 +299,97 @@ def import_file(
                 f"{r['pps_element']!r}. One file must cover one project."
             )
 
+    period_start = min(r["posting_date"] for r in records)
+    period_end = max(r["posting_date"] for r in records)
+    return file_hash, records, pps_element, period_start, period_end
+
+
+def import_file(
+    session: Session,
+    path: Path,
+    user_id: int,
+    name_resolver: Callable[[str], str],
+    encoding: str = DEFAULT_ENCODING,
+    mode: str = "add",
+) -> ImportResult:
+    if mode not in ("add", "replace"):
+        raise ValueError(f"Unknown mode {mode!r}; expected 'add' or 'replace'.")
+
+    file_hash, records, pps_element, period_start, period_end = _parse_and_validate(
+        path, encoding
+    )
+
+    # For "add", skip if we've already ingested this exact file. For "replace"
+    # the user is asking to overwrite, so re-running on the same file is fine.
+    if mode == "add":
+        prior = session.scalar(
+            select(ImportRun)
+            .where(
+                ImportRun.file_sha256 == file_hash,
+                ImportRun.user_id == user_id,
+                ImportRun.mode == "add",
+            )
+            .order_by(ImportRun.imported_at.desc())
+        )
+        if prior is not None:
+            proj = (
+                session.get(Project, prior.project_id) if prior.project_id else None
+            )
+            return ImportResult(
+                project_id=prior.project_id or 0,
+                project_name=proj.name if proj else "<deleted>",
+                pps_element=proj.pps_element if proj else "",
+                rows_imported=0,
+                rows_skipped=0,
+                rows_deleted=0,
+                mode="add",
+                file_sha256=file_hash,
+                duplicate_file=True,
+            )
+
     project = ensure_project(session, user_id, pps_element, name_resolver)
+
+    rows_deleted = 0
+    if mode == "replace":
+        # Delete the project's existing rows in the file's date range; outside
+        # that range is left alone so partial-year exports don't nuke other
+        # months.
+        from sqlalchemy import delete as sql_delete
+
+        result = session.execute(
+            sql_delete(Transaction).where(
+                Transaction.project_id == project.id,
+                Transaction.posting_date.between(period_start, period_end),
+            )
+        )
+        rows_deleted = result.rowcount or 0
+        session.flush()
+
+    # Python-side dedup against rows already in the period. Postgres's UNIQUE
+    # treats NULL as distinct, so the natural-key constraint wouldn't catch a
+    # NULL-employee row that's logically identical to an existing one —
+    # ON CONFLICT alone would let it duplicate. We use the same _natural_key
+    # tuple as analyze does, which keeps the two consistent.
+    existing_db = list(
+        session.scalars(
+            select(Transaction).where(
+                Transaction.project_id == project.id,
+                Transaction.posting_date.between(period_start, period_end),
+            )
+        )
+    )
+    seen_keys: set[tuple] = {_natural_key(t) for t in existing_db}
 
     rows_imported = 0
     for rec in records:
+        key = _natural_key(rec)
+        if key in seen_keys:
+            continue
         values = {k: v for k, v in rec.items() if k != "pps_element"}
         values["project_id"] = project.id
-        stmt = (
-            pg_insert(Transaction)
-            .values(**values)
-            .on_conflict_do_nothing(constraint="uq_transactions_natural_key")
-            .returning(Transaction.id)
-        )
-        result = session.execute(stmt).first()
-        if result is not None:
-            rows_imported += 1
+        session.add(Transaction(**values))
+        seen_keys.add(key)
+        rows_imported += 1
     rows_skipped = len(records) - rows_imported
 
     run = ImportRun(
@@ -287,8 +397,10 @@ def import_file(
         project_id=project.id,
         filename=str(path.name),
         file_sha256=file_hash,
+        mode=mode,
         rows_imported=rows_imported,
         rows_skipped=rows_skipped,
+        rows_deleted=rows_deleted,
     )
     session.add(run)
     session.commit()
@@ -299,6 +411,79 @@ def import_file(
         pps_element=project.pps_element,
         rows_imported=rows_imported,
         rows_skipped=rows_skipped,
+        rows_deleted=rows_deleted,
+        mode=mode,
         file_sha256=file_hash,
         duplicate_file=False,
+    )
+
+
+def analyze_file(
+    session: Session,
+    path: Path,
+    user_id: int,
+    encoding: str = DEFAULT_ENCODING,
+) -> ImportAnalysis:
+    """Compute a diff between the file and the DB for the file's date range.
+    No DB writes; doesn't create a project if it's new."""
+    file_hash, records, pps_element, period_start, period_end = _parse_and_validate(
+        path, encoding
+    )
+
+    project = session.scalar(
+        select(Project).where(
+            Project.owner_user_id == user_id,
+            Project.pps_element == pps_element,
+        )
+    )
+
+    file_by_key: dict[tuple, dict] = {_natural_key(r): r for r in records}
+
+    if project is None:
+        # Brand-new project — everything in the file is "new".
+        sort_key = lambda r: (r["posting_date"], r["document_number"])
+        return ImportAnalysis(
+            project_id=0,
+            project_name="(new project)",
+            pps_element=pps_element,
+            file_sha256=file_hash,
+            period_start=period_start,
+            period_end=period_end,
+            new_records=sorted(records, key=sort_key),
+            existing_records=[],
+            missing_records=[],
+        )
+
+    db_rows = list(
+        session.scalars(
+            select(Transaction).where(
+                Transaction.project_id == project.id,
+                Transaction.posting_date.between(period_start, period_end),
+            )
+        )
+    )
+    db_by_key: dict[tuple, Transaction] = {_natural_key(t): t for t in db_rows}
+
+    file_keys = set(file_by_key.keys())
+    db_keys = set(db_by_key.keys())
+    sort_key = lambda r: (r["posting_date"], r["document_number"])
+    new_records = sorted([file_by_key[k] for k in file_keys - db_keys], key=sort_key)
+    existing_records = sorted(
+        [file_by_key[k] for k in file_keys & db_keys], key=sort_key
+    )
+    missing_records = sorted(
+        [_record_to_dict(db_by_key[k]) for k in db_keys - file_keys],
+        key=sort_key,
+    )
+
+    return ImportAnalysis(
+        project_id=project.id,
+        project_name=project.name,
+        pps_element=project.pps_element,
+        file_sha256=file_hash,
+        period_start=period_start,
+        period_end=period_end,
+        new_records=new_records,
+        existing_records=existing_records,
+        missing_records=missing_records,
     )

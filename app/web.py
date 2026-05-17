@@ -59,8 +59,10 @@ class ImportRunView:
     filename: str
     project_name: str
     pps_element: str
+    mode: str
     rows_imported: int
     rows_skipped: int
+    rows_deleted: int
 
 
 @dataclass
@@ -154,8 +156,10 @@ def _import_run_view(session: Session, run: ImportRun) -> ImportRunView:
         filename=run.filename,
         project_name=project.name if project else "<deleted>",
         pps_element=project.pps_element if project else "",
+        mode=run.mode,
         rows_imported=run.rows_imported,
         rows_skipped=run.rows_skipped,
+        rows_deleted=run.rows_deleted,
     )
 
 
@@ -253,7 +257,11 @@ def do_import(
     request: Request,
     filename: str,
     name: Optional[str] = Form(default=None),
+    mode: str = Form(default="add"),
 ) -> HTMLResponse:
+    if mode not in ("add", "replace"):
+        raise HTTPException(status_code=400, detail="Invalid mode.")
+
     inputs_dir = _inputs_dir()
     path = inputs_dir / filename
     if not path.exists() or not path.is_file() or path.parent != inputs_dir:
@@ -277,6 +285,7 @@ def do_import(
                 path=path,
                 user_id=user.id,
                 name_resolver=name_resolver,
+                mode=mode,
             )
         except _NeedsName as exc:
             entry = FileEntry(
@@ -323,6 +332,39 @@ def do_import(
         {"request": request, "runs": run_views, "oob": True}
     )
     return HTMLResponse(row_html + oob_html)
+
+
+@app.get("/imports/{filename}/analyze", response_class=HTMLResponse)
+def analyze_import(request: Request, filename: str) -> HTMLResponse:
+    """Return an analysis panel showing the diff vs the DB for the file's
+    date range. No DB writes."""
+    from app.importer import analyze_file
+
+    inputs_dir = _inputs_dir()
+    path = inputs_dir / filename
+    if not path.exists() or not path.is_file() or path.parent != inputs_dir:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        try:
+            analysis = analyze_file(session, path, user.id)
+        except ValueError as exc:
+            return templates.TemplateResponse(
+                request,
+                "_import_analysis.html",
+                {"filename": filename, "error": str(exc), "analysis": None},
+            )
+
+    return templates.TemplateResponse(
+        request,
+        "_import_analysis.html",
+        {
+            "filename": filename,
+            "analysis": analysis,
+            "error": None,
+        },
+    )
 
 
 class _NeedsName(Exception):

@@ -14,8 +14,10 @@
             <th class="px-4 py-2 font-medium">When</th>
             <th class="px-4 py-2 font-medium">File</th>
             <th class="px-4 py-2 font-medium">Project</th>
-            <th class="px-4 py-2 font-medium text-right">Imported</th>
+            <th class="px-4 py-2 font-medium">Mode</th>
+            <th class="px-4 py-2 font-medium text-right">Inserted</th>
             <th class="px-4 py-2 font-medium text-right">Skipped</th>
+            <th class="px-4 py-2 font-medium text-right">Deleted</th>
           </tr>
         </thead>
         <tbody>
@@ -27,8 +29,16 @@
                 {{ r.project_name }}
                 <span class="text-slate-400 dark:text-slate-500 text-xs">({{ r.pps_element }})</span>
               </td>
+              <td class="px-4 py-2">
+                {% if r.mode == 'replace' %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 text-xs font-medium">replace</span>
+                {% else %}
+                  <span class="text-slate-500 dark:text-slate-400 text-xs">add</span>
+                {% endif %}
+              </td>
               <td class="px-4 py-2 text-right tabular-nums">{{ r.rows_imported }}</td>
               <td class="px-4 py-2 text-right tabular-nums text-slate-400 dark:text-slate-500">{{ r.rows_skipped }}</td>
+              <td class="px-4 py-2 text-right tabular-nums {% if r.rows_deleted %}text-amber-600 dark:text-amber-400{% else %}text-slate-400 dark:text-slate-500{% endif %}">{{ r.rows_deleted }}</td>
             </tr>
           {% endfor %}
         </tbody>
