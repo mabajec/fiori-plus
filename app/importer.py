@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -28,33 +30,6 @@ CANDIDATE_ENCODINGS: tuple[str, ...] = (
     "cp1250",
 )
 
-
-def detect_encoding(path: Path) -> str:
-    """Pick the first candidate encoding under which the header row decodes
-    AND yields all required column names. Returns DEFAULT_ENCODING if nothing
-    fits, so downstream parsing still raises a meaningful error.
-
-    Note: mac_latin2 / cp1250 are single-byte encodings, so they never raise
-    UnicodeDecodeError — we have to validate semantically (the required-field
-    columns map cleanly) rather than just structurally."""
-    for enc in CANDIDATE_ENCODINGS:
-        try:
-            with open(path, encoding=enc) as f:
-                text = f.read()
-        except UnicodeDecodeError:
-            continue
-        for raw in text.splitlines():
-            cells = raw.split("\t")
-            while cells and cells[0] == "":
-                cells.pop(0)
-            if not cells or cells[0].strip() != HEADER_FIRST_CELL:
-                continue
-            mapped = {COLUMN_MAP[c.strip()] for c in cells if c.strip() in COLUMN_MAP}
-            if REQUIRED_FIELDS.issubset(mapped):
-                return enc
-            break  # found the header row but it doesn't map; try next encoding
-    return DEFAULT_ENCODING
-
 # Source-system column header → field name we use internally.
 COLUMN_MAP: dict[str, str] = {
     "PPS element": "pps_element",
@@ -79,6 +54,183 @@ REQUIRED_FIELDS = {
 
 ALL_FIELDS = set(COLUMN_MAP.values())
 
+# Reverse lookup field → canonical header label.
+_CANONICAL_FOR_FIELD: dict[str, str] = {v: k for k, v in COLUMN_MAP.items()}
+
+
+def _normalize_header(s: str) -> str:
+    """Strip accents/combining marks, lowercase, collapse whitespace. Used
+    as the forgiving comparison key — handles Unicode variants and stray
+    spaces but won't silently match a different word."""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.lower().split())
+
+
+# Precomputed normalized lookup; built once at import time.
+_NORMALIZED_COLUMN_MAP: dict[str, str] = {
+    _normalize_header(k): v for k, v in COLUMN_MAP.items()
+}
+
+
+def signature_for(unrecognized_headers: list[str]) -> str:
+    """Stable short hash of the sorted, normalized unrecognized headers.
+    Two files whose unmappable columns share the same names (after
+    normalization) share a signature — and therefore a saved mapping."""
+    normalized = sorted({_normalize_header(h) for h in unrecognized_headers})
+    return hashlib.sha256("\n".join(normalized).encode()).hexdigest()[:32]
+
+
+def suggest_mapping(
+    unrecognized: list[str], already_mapped_fields: set[str]
+) -> dict[str, str]:
+    """Best-effort suggestion of {file_header: field_name} for the mapping
+    panel. Conservative: only suggests when similarity is above a threshold,
+    and never proposes the same field twice. Compares against the canonical
+    header, the field name, and a few label variants."""
+    unmapped_fields = set(COLUMN_MAP.values()) - already_mapped_fields
+    if not unmapped_fields:
+        return {}
+    field_labels: dict[str, list[str]] = {}
+    for canonical, field in COLUMN_MAP.items():
+        if field not in unmapped_fields:
+            continue
+        field_labels.setdefault(field, []).extend(
+            [
+                _normalize_header(canonical),
+                _normalize_header(field),
+                _normalize_header(field.replace("_", " ")),
+            ]
+        )
+    suggestions: dict[str, str] = {}
+    used_fields: set[str] = set()
+    for h in unrecognized:
+        nh = _normalize_header(h)
+        best_field: str | None = None
+        best_score = 0.0
+        for field, labels in field_labels.items():
+            if field in used_fields:
+                continue
+            for label in labels:
+                score = difflib.SequenceMatcher(None, nh, label).ratio()
+                if score > best_score:
+                    best_score, best_field = score, field
+        if best_field and best_score >= 0.55:
+            suggestions[h] = best_field
+            used_fields.add(best_field)
+    return suggestions
+
+
+@dataclass
+class HeaderResolution:
+    """Outcome of mapping a file's header row to internal field names.
+
+    Layered match: exact COLUMN_MAP entry → user/saved override →
+    normalized form (accents stripped, lowercased). `missing_required`
+    being non-empty means the caller should either supply overrides or
+    raise NeedsHeaderMapping for the UI to prompt."""
+    field_map: dict[int, str]
+    normalization_log: list[tuple[str, str]] = dc_field(default_factory=list)
+    override_log: list[tuple[str, str]] = dc_field(default_factory=list)
+    unrecognized: list[str] = dc_field(default_factory=list)
+    missing_required: set[str] = dc_field(default_factory=set)
+    suggested: dict[str, str] = dc_field(default_factory=dict)
+    signature: str = ""
+
+
+def resolve_header(
+    header_cells: list[str], overrides: dict[str, str] | None = None
+) -> HeaderResolution:
+    """Map a header row to field names. Three tiers per cell:
+      1. Exact match against COLUMN_MAP keys
+      2. Explicit override (file_header → field_name) from a saved or
+         user-supplied mapping
+      3. Normalized fall-back (accents stripped, lowercase, whitespace
+         collapsed)
+    Anything left over goes to `unrecognized` and contributes to the
+    signature."""
+    overrides = overrides or {}
+    field_map: dict[int, str] = {}
+    normalization_log: list[tuple[str, str]] = []
+    override_log: list[tuple[str, str]] = []
+    unrecognized: list[str] = []
+    for idx, cell in enumerate(header_cells):
+        raw = cell.strip()
+        if not raw:
+            continue
+        if raw in COLUMN_MAP:
+            field_map[idx] = COLUMN_MAP[raw]
+            continue
+        # Explicit override beats normalization — the user has spoken.
+        if raw in overrides and overrides[raw] in ALL_FIELDS:
+            field = overrides[raw]
+            field_map[idx] = field
+            override_log.append((raw, _CANONICAL_FOR_FIELD.get(field, field)))
+            continue
+        norm = _normalize_header(raw)
+        if norm in _NORMALIZED_COLUMN_MAP:
+            field = _NORMALIZED_COLUMN_MAP[norm]
+            field_map[idx] = field
+            canonical = _CANONICAL_FOR_FIELD.get(field, field)
+            if canonical != raw:
+                normalization_log.append((raw, canonical))
+            continue
+        unrecognized.append(raw)
+    mapped_fields = set(field_map.values())
+    missing_required = REQUIRED_FIELDS - mapped_fields
+    suggested = (
+        suggest_mapping(unrecognized, mapped_fields) if missing_required else {}
+    )
+    return HeaderResolution(
+        field_map=field_map,
+        normalization_log=normalization_log,
+        override_log=override_log,
+        unrecognized=unrecognized,
+        missing_required=missing_required,
+        suggested=suggested,
+        signature=signature_for(unrecognized),
+    )
+
+
+class NeedsHeaderMapping(Exception):
+    """Raised when a file's header row leaves required fields unmapped and
+    the caller didn't supply enough overrides. The web layer catches this
+    and renders the mapping panel."""
+    def __init__(self, resolution: HeaderResolution):
+        super().__init__(
+            f"Cannot map required column(s): "
+            f"{sorted(resolution.missing_required)}"
+        )
+        self.resolution = resolution
+
+
+def detect_encoding(path: Path) -> str:
+    """Pick the first candidate encoding under which the header row decodes
+    AND yields all required column names (after normalization). Returns
+    DEFAULT_ENCODING if nothing fits, so downstream parsing still raises a
+    meaningful error.
+
+    mac_latin2 / cp1250 are single-byte encodings, so they never raise
+    UnicodeDecodeError — we have to validate semantically (the required-field
+    columns map cleanly under that encoding) rather than just structurally."""
+    for enc in CANDIDATE_ENCODINGS:
+        try:
+            with open(path, encoding=enc) as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            continue
+        for raw in text.splitlines():
+            cells = raw.split("\t")
+            while cells and cells[0] == "":
+                cells.pop(0)
+            if not cells or cells[0].strip() != HEADER_FIRST_CELL:
+                continue
+            resolution = resolve_header(cells)
+            if not resolution.missing_required:
+                return enc
+            break  # header located but unresolvable under this encoding
+    return DEFAULT_ENCODING
+
 
 @dataclass
 class ImportResult:
@@ -91,6 +243,8 @@ class ImportResult:
     mode: str               # "add" or "replace"
     file_sha256: str
     duplicate_file: bool
+    normalization_log: list[tuple[str, str]] = dc_field(default_factory=list)
+    override_log: list[tuple[str, str]] = dc_field(default_factory=list)
 
 
 @dataclass
@@ -106,6 +260,8 @@ class ImportAnalysis:
     new_records: list[dict]              # in file, not in DB
     existing_records: list[dict]         # in both (natural key matches)
     missing_records: list[dict]          # in DB for period, not in file
+    normalization_log: list[tuple[str, str]] = dc_field(default_factory=list)
+    override_log: list[tuple[str, str]] = dc_field(default_factory=list)
 
 
 def sha256_file(path: Path) -> str:
@@ -131,22 +287,40 @@ def parse_date(s: str) -> date:
     raise ValueError(f"Unparseable date: {s!r}")
 
 
-def _build_field_map(header_cells: list[str]) -> dict[int, str]:
-    """Map column position → field name based on the header row."""
-    field_map: dict[int, str] = {}
-    for idx, cell in enumerate(header_cells):
-        name = cell.strip()
-        if name in COLUMN_MAP:
-            field_map[idx] = COLUMN_MAP[name]
-    missing = REQUIRED_FIELDS - set(field_map.values())
-    if missing:
-        raise ValueError(
-            f"Header row missing required columns: {sorted(missing)}"
-        )
-    return field_map
+def parse_header(
+    path: Path,
+    encoding: str | None = None,
+    overrides: dict[str, str] | None = None,
+) -> HeaderResolution:
+    """Locate and resolve the header row. Raises NeedsHeaderMapping if any
+    required fields are still unmapped after normalization and overrides.
+    Useful when the caller wants the resolution metadata up front (e.g.
+    to look up a saved mapping by signature)."""
+    if encoding is None:
+        encoding = detect_encoding(path)
+    with open(path, encoding=encoding) as f:
+        text = f.read()
+    for raw in text.splitlines():
+        cells = raw.split("\t")
+        while cells and cells[0] == "":
+            cells.pop(0)
+        if not cells or cells[0].strip() != HEADER_FIRST_CELL:
+            continue
+        resolution = resolve_header(cells, overrides=overrides)
+        if resolution.missing_required:
+            raise NeedsHeaderMapping(resolution)
+        return resolution
+    raise ValueError(
+        f"No column header row (starting with {HEADER_FIRST_CELL!r}) found "
+        f"in {path}."
+    )
 
 
-def peek_pps_element(path: Path, encoding: str | None = None) -> str:
+def peek_pps_element(
+    path: Path,
+    encoding: str | None = None,
+    overrides: dict[str, str] | None = None,
+) -> str:
     """Return the PPS element from the first data row, without parsing the rest.
 
     Used by the UI to decide whether the project is already known (no name
@@ -154,7 +328,7 @@ def peek_pps_element(path: Path, encoding: str | None = None) -> str:
     """
     if encoding is None:
         encoding = detect_encoding(path)
-    for rec in read_records(path, encoding=encoding):
+    for rec in read_records(path, encoding=encoding, overrides=overrides):
         pps = rec.get("pps_element")
         if pps:
             return pps
@@ -195,14 +369,17 @@ def read_footer_total(path: Path, encoding: str | None = None) -> Decimal:
 
 
 def read_records(
-    path: Path, encoding: str | None = None
+    path: Path,
+    encoding: str | None = None,
+    overrides: dict[str, str] | None = None,
 ) -> Iterator[dict]:
     """Yield one dict per data row, with string values mapped by column name.
 
     Handles the two known source-system layouts (10-column full and 7-column
     compact) and any future column reorderings, because field positions are
     resolved from the actual header row in each file. Skips preamble lines
-    before the header and stops at a `*` totals footer.
+    before the header and stops at a `*` totals footer. Raises
+    NeedsHeaderMapping if a required field is unmappable.
     """
     if encoding is None:
         encoding = detect_encoding(path)
@@ -223,7 +400,10 @@ def read_records(
 
         if field_map is None:
             if first == HEADER_FIRST_CELL:
-                field_map = _build_field_map(cells)
+                resolution = resolve_header(cells, overrides=overrides)
+                if resolution.missing_required:
+                    raise NeedsHeaderMapping(resolution)
+                field_map = resolution.field_map
             continue
 
         if first == "*":
@@ -324,15 +504,22 @@ def _record_to_dict(t: Transaction) -> dict:
 
 
 def _parse_and_validate(
-    path: Path, encoding: str | None
-) -> tuple[str, list[dict], str, date, date]:
+    path: Path,
+    encoding: str | None,
+    overrides: dict[str, str] | None = None,
+) -> tuple[str, list[dict], str, date, date, HeaderResolution]:
     """Parse + validate a file. Returns (file_hash, records, pps_element,
-    period_start, period_end). Raises ValueError on any structural problem
-    or footer-total mismatch."""
+    period_start, period_end, header_resolution). Raises ValueError on any
+    structural problem or footer-total mismatch; NeedsHeaderMapping if the
+    header row is unresolvable."""
     if encoding is None:
         encoding = detect_encoding(path)
     file_hash = sha256_file(path)
-    records = [parse_record(r) for r in read_records(path, encoding=encoding)]
+    resolution = parse_header(path, encoding=encoding, overrides=overrides)
+    records = [
+        parse_record(r)
+        for r in read_records(path, encoding=encoding, overrides=overrides)
+    ]
     if not records:
         raise ValueError("File contains no data rows.")
 
@@ -356,7 +543,7 @@ def _parse_and_validate(
 
     period_start = min(r["posting_date"] for r in records)
     period_end = max(r["posting_date"] for r in records)
-    return file_hash, records, pps_element, period_start, period_end
+    return file_hash, records, pps_element, period_start, period_end, resolution
 
 
 def import_file(
@@ -368,6 +555,7 @@ def import_file(
     mode: str = "add",
     new_fingerprints: set[str] | None = None,
     missing_ids: set[int] | None = None,
+    overrides: dict[str, str] | None = None,
 ) -> ImportResult:
     """Apply a file to the DB.
 
@@ -395,9 +583,14 @@ def import_file(
 
     selective = new_fingerprints is not None or missing_ids is not None
 
-    file_hash, records, pps_element, period_start, period_end = _parse_and_validate(
-        path, encoding
-    )
+    (
+        file_hash,
+        records,
+        pps_element,
+        period_start,
+        period_end,
+        resolution,
+    ) = _parse_and_validate(path, encoding, overrides=overrides)
 
     # For "add" with no selection, skip if we've already ingested this exact
     # file. For "replace" the user is asking to overwrite, so re-running on the
@@ -516,6 +709,8 @@ def import_file(
         mode=mode,
         file_sha256=file_hash,
         duplicate_file=False,
+        normalization_log=resolution.normalization_log,
+        override_log=resolution.override_log,
     )
 
 
@@ -524,12 +719,18 @@ def analyze_file(
     path: Path,
     user_id: int,
     encoding: str | None = None,
+    overrides: dict[str, str] | None = None,
 ) -> ImportAnalysis:
     """Compute a diff between the file and the DB for the file's date range.
     No DB writes; doesn't create a project if it's new."""
-    file_hash, records, pps_element, period_start, period_end = _parse_and_validate(
-        path, encoding
-    )
+    (
+        file_hash,
+        records,
+        pps_element,
+        period_start,
+        period_end,
+        resolution,
+    ) = _parse_and_validate(path, encoding, overrides=overrides)
 
     project = session.scalar(
         select(Project).where(
@@ -559,6 +760,8 @@ def analyze_file(
             new_records=sorted(file_by_key.values(), key=sort_key),
             existing_records=[],
             missing_records=[],
+            normalization_log=resolution.normalization_log,
+            override_log=resolution.override_log,
         )
 
     db_rows = list(
@@ -593,4 +796,6 @@ def analyze_file(
         new_records=new_records,
         existing_records=existing_records,
         missing_records=missing_records,
+        normalization_log=resolution.normalization_log,
+        override_log=resolution.override_log,
     )

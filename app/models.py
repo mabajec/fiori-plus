@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -146,6 +147,32 @@ class Transaction(Base):
             "employee",
             "text",
             name="uq_transactions_natural_key",
+        ),
+    )
+
+
+class HeaderMapping(Base):
+    """Saved column-name → field mappings, keyed by the signature of the
+    unrecognized headers from a file. Lets a user resolve a quirky header
+    set once and have it auto-apply to every future file with the same
+    quirk."""
+    __tablename__ = "header_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    mapping: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "signature", name="uq_header_mappings_user_signature"
         ),
     )
 
