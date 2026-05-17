@@ -286,9 +286,10 @@ def _parse_and_validate(
     parsed_total = sum((r["amount"] for r in records), start=Decimal("0"))
     if parsed_total != footer_total:
         raise ValueError(
-            f"Total mismatch: parsed rows sum to {parsed_total}, but the "
-            f"file footer reports {footer_total} (delta "
-            f"{parsed_total - footer_total}). Refusing to import."
+            f"This file is internally inconsistent: rows sum to "
+            f"{parsed_total} but the footer reports {footer_total} "
+            f"(delta {parsed_total - footer_total}). Re-export from the "
+            f"source system or check whether the file was modified."
         )
 
     pps_element = records[0]["pps_element"]
