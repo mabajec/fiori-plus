@@ -43,10 +43,11 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
-      # TSV exports go here. Defaults to ./inputs relative to this compose
-      # file (so `cp file.tsv inputs/` on the server "just works"); override
-      # with HOST_INPUTS_DIR in .env.prod if you want a different location.
-      - ${HOST_INPUTS_DIR:-./inputs}:/app/inputs:ro
+      # TSV exports go here. Per-user subfolders are created on demand by
+      # the app, and the /imports upload endpoint writes to them — so this
+      # mount must be read-write. Override the host path with
+      # HOST_INPUTS_DIR in .env.prod if you want a different location.
+      - ${HOST_INPUTS_DIR:-./inputs}:/app/inputs
 
 volumes:
   db_data:
