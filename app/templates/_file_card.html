@@ -1,4 +1,17 @@
 {# A single file card. Swapped via HTMX on each action. #}
+{% macro delete_file_button(entry) %}
+<button type="button"
+        hx-delete="/imports/{{ entry.filename|urlencode }}"
+        hx-target="#file-card-{{ entry.id }}"
+        hx-swap="outerHTML"
+        title="Delete this file from your inputs folder. Only available before it's imported."
+        class="ml-auto p-1 rounded text-slate-300 dark:text-slate-600 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors"
+        aria-label="Delete file">
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+  </svg>
+</button>
+{% endmacro %}
 <div id="file-card-{{ entry.id }}"
      class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-5 hover:shadow-sm dark:hover:shadow-slate-900/50 transition-shadow">
   {% if entry.needs_mapping %}
@@ -7,6 +20,7 @@
       <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 text-xs font-medium">
         <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Needs column mapping
       </span>
+      {{ delete_file_button(entry) }}
     </div>
     <div class="text-xs text-slate-500 dark:text-slate-400 mb-3">
       {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
@@ -57,6 +71,7 @@
       <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 text-xs font-medium">
         <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>Error
       </span>
+      {{ delete_file_button(entry) }}
     </div>
     <div class="text-xs text-slate-500 dark:text-slate-400 mb-2">
       {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}
@@ -71,6 +86,7 @@
       {% if entry.saved_mapping_id %}
         {% include "_saved_mapping_badge.html" %}
       {% endif %}
+      {{ delete_file_button(entry) }}
     </div>
     <div class="text-xs text-slate-500 dark:text-slate-400 mb-3">
       {{ entry.size_kb }} KB · modified {{ entry.modified.strftime('%Y-%m-%d %H:%M') }}

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     session_secret: str = "dev-secret-do-not-use-in-production"
     session_max_age_days: int = 7
     session_https_only: bool = False  # set True when behind TLS in production
-    totp_issuer: str = "Fiori"
+    totp_issuer: str = "Fiori Plus"
 
 
 settings = Settings()

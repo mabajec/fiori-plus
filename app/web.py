@@ -97,7 +97,7 @@ class FileEntry:
     saved_mapping_created: Optional[datetime] = None
 
 
-app = FastAPI(title="Fiori")
+app = FastAPI(title="Fiori Plus")
 app.mount(
     "/static",
     StaticFiles(directory=Path(__file__).parent / "static"),
@@ -838,6 +838,39 @@ def forget_mapping(
                 return templates.TemplateResponse(
                     request, "_file_card.html", {"entry": entry}
                 )
+    return HTMLResponse("")
+
+
+@app.delete("/imports/{filename}", response_class=HTMLResponse)
+def delete_file(request: Request, filename: str) -> HTMLResponse:
+    """Remove an unimported file from the user's inputs folder. Used by the
+    trash button on a file card to discard an upload before it's been
+    imported. Refuses to delete a file that's already been imported — the
+    audit row would point at a missing file and the user should instead
+    Forget the audit entry."""
+    with SessionLocal() as session:
+        user = _current_user(session, request)
+        path = _resolve_user_file(user.id, filename)
+        from app.importer import sha256_file
+        file_hash = sha256_file(path)
+        already_imported = session.scalar(
+            select(ImportRun)
+            .where(
+                ImportRun.user_id == user.id,
+                ImportRun.file_sha256 == file_hash,
+            )
+            .limit(1)
+        )
+        if already_imported is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This file is already imported — remove the audit entry "
+                    "from Recent imports first, then delete the file."
+                ),
+            )
+        path.unlink()
+    # Empty body + outerHTML on the file card removes it from the page.
     return HTMLResponse("")
 
 

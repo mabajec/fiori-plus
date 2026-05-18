@@ -13,7 +13,7 @@ from app.importer import import_file
 from app.models import User
 
 
-app = typer.Typer(help="Fiori — project financial data tool.", no_args_is_help=True)
+app = typer.Typer(help="Fiori Plus — project financial data tool.", no_args_is_help=True)
 user_app = typer.Typer(help="Manage users (admin operations).", no_args_is_help=True)
 app.add_typer(user_app, name="user")
 
