@@ -1003,7 +1003,10 @@ def _txn_view(tr: Transaction) -> TransactionView:
 @app.get("/transactions", response_class=HTMLResponse)
 def transactions_page(
     request: Request,
-    project_id: Optional[int] = None,
+    # Accept everything as a string and parse below — the HTMX filter form
+    # sends empty strings for unset fields, which would 422 against typed
+    # int/date parameters.
+    project_id: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     account_code: Optional[str] = None,
@@ -1021,7 +1024,12 @@ def transactions_page(
 
     df = _parse_iso_date(date_from)
     dt = _parse_iso_date(date_to)
-    project_id = project_id or None
+    project_id_int: Optional[int] = None
+    if project_id and project_id.strip():
+        try:
+            project_id_int = int(project_id)
+        except ValueError:
+            project_id_int = None
     account_code = (account_code or "").strip() or None
     q = (q or "").strip() or None
     source = (source or "").strip() or None
@@ -1031,8 +1039,8 @@ def transactions_page(
         accessible = _accessible_project_ids(session, user.id)
 
         base_where = [Transaction.project_id.in_(accessible)] if accessible else [Transaction.id == -1]
-        if project_id is not None:
-            base_where.append(Transaction.project_id == project_id)
+        if project_id_int is not None:
+            base_where.append(Transaction.project_id == project_id_int)
         if df is not None:
             base_where.append(Transaction.posting_date >= df)
         if dt is not None:
@@ -1087,7 +1095,7 @@ def transactions_page(
         "projects": projects,
         "sources": sources,
         "filters": {
-            "project_id": project_id,
+            "project_id": project_id_int,
             "date_from": date_from,
             "date_to": date_to,
             "account_code": account_code,
