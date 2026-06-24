@@ -75,6 +75,13 @@
       <p class="text-xs text-slate-500 dark:text-slate-400">
         * required field. The mapping is saved per signature, so any future file with these same column names auto-applies it.
       </p>
+      <div class="text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2">
+        Want the <strong>Spending by person and month</strong> view to fill in? It needs the
+        <code class="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded">KadrŠt</code> (personnel-number)
+        column. If you see it in the list above, map it to <code class="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded">KadrŠt (employee)</code>.
+        If it isn't there at all, re-export from FIORI using the <span class="font-mono">/OSEBJE_TS2 … Stroški osebja_TS</span> view —
+        see the export guide on the <a href="/imports" class="text-indigo-600 dark:text-indigo-400 hover:underline">Imports</a> page.
+      </div>
       {% if resolution.missing_required %}
         <div class="text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
           Still missing: <span class="font-mono">{{ resolution.missing_required|sort|join(', ') }}</span>
