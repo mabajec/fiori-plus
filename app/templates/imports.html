@@ -32,6 +32,34 @@
     Only <code>.txt</code> exports. We'll check the file has a recognisable header before storing it.
   </p>
   <div id="upload-result"></div>
+
+  <details class="mt-4 group">
+    <summary class="cursor-pointer text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:underline list-none flex items-center gap-1.5">
+      <svg class="w-3.5 h-3.5 transition-transform group-open:rotate-90" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd"/></svg>
+      How to export the right file from FIORI
+    </summary>
+    <div class="mt-3 pl-5 text-sm text-slate-600 dark:text-slate-300 space-y-2">
+      <p>
+        The <strong>Spending by person and month</strong> view only fills in when the export includes
+        the <code class="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded text-xs">KadrŠt</code>
+        (personnel-number) column. That column is present only in the personnel-costs layout, so the
+        view you pick in FIORI matters. To get it:
+      </p>
+      <ol class="list-decimal list-outside ml-5 space-y-1.5">
+        <li>Select the project you want to export.</li>
+        <li>In the TOTAL row at the bottom, click <strong>Porabljeno</strong> to open the details.</li>
+        <li>In <strong>Izbira izgleda</strong>, set the view to
+          <code class="bg-slate-100 dark:bg-slate-700 px-1 py-0.5 rounded text-xs">/OSEBJE_TS2 … Stroški osebja_TS</code>.</li>
+        <li>Click the <strong>Export</strong> icon (fourth from the right) and choose
+          <strong>Lokalna datoteka</strong>.</li>
+        <li>Pick <strong>Teksti s tabulatorji</strong> (tab-separated text) as the format.</li>
+      </ol>
+      <p class="text-xs text-slate-500 dark:text-slate-400">
+        Other layouts (without <code>KadrŠt</code>) still import and show correct totals, but the
+        per-person grid will be empty because there's no personnel number to group by.
+      </p>
+    </div>
+  </details>
 </section>
 
 {% include "_files_list.html" %}
