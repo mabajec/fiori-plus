@@ -6,9 +6,11 @@
 #   docker compose -f docker-compose.prod.yml --env-file .env.prod exec app alembic upgrade head
 #   docker compose -f docker-compose.prod.yml --env-file .env.prod exec app fiori init
 #
-# The app is exposed on ${APP_PORT} (default 8000) on the host. A reverse
-# proxy (Traefik, in this deployment) can later proxy a real domain to it
-# and terminate TLS — see DEPLOY.md.
+# The app is served by the host's Traefik reverse proxy (Docker provider,
+# shared external network "web") at https://${APP_HOST} with an automatic
+# Let's Encrypt certificate — see DEPLOY.md. Port ${APP_PORT} (default 8000)
+# is additionally bound on ${APP_BIND} (default 127.0.0.1) for local checks
+# only; the host firewall drops it from the internet anyway.
 
 services:
   db:
@@ -41,13 +43,36 @@ services:
       DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@local}
       DEFAULT_ADMIN_NAME: ${DEFAULT_ADMIN_NAME:-Admin}
     ports:
-      - "${APP_PORT:-8000}:8000"
+      # Loopback only — the public route is the Traefik router below.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8000}:8000"
+    networks:
+      - default
+      - web
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: web
+      traefik.http.services.fiori-plus.loadbalancer.server.port: "8000"
+      # Plain HTTP: only used for the ACME challenge and to bounce to HTTPS.
+      traefik.http.routers.fiori-plus.entrypoints: http
+      traefik.http.routers.fiori-plus.rule: Host(`${APP_HOST:?set APP_HOST in .env.prod}`)
+      traefik.http.routers.fiori-plus.middlewares: fiori-plus-https
+      traefik.http.middlewares.fiori-plus-https.redirectscheme.scheme: https
+      traefik.http.middlewares.fiori-plus-https.redirectscheme.permanent: "true"
+      traefik.http.routers.fiori-plus-secure.entrypoints: https
+      traefik.http.routers.fiori-plus-secure.rule: Host(`${APP_HOST}`)
+      traefik.http.routers.fiori-plus-secure.tls: "true"
+      traefik.http.routers.fiori-plus-secure.tls.certresolver: http
     volumes:
       # TSV exports go here. Per-user subfolders are created on demand by
       # the app, and the /imports upload endpoint writes to them — so this
       # mount must be read-write. Override the host path with
       # HOST_INPUTS_DIR in .env.prod if you want a different location.
       - ${HOST_INPUTS_DIR:-./inputs}:/app/inputs
+
+networks:
+  # Created and owned by the Traefik deployment (/opt/truebar/traefik).
+  web:
+    external: true
 
 volumes:
   db_data:
