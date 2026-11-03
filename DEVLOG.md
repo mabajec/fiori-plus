@@ -49,17 +49,20 @@ entry point), Docker Compose for dev and prod. No JS build step.
    in-app file upload to per-user inputs subfolders
 7. Rebrand to "Fiori Plus"; FIORI export guide on the imports page
 
-**Known open items / ideas.**
-- **2026-11-03 Traefik route — deployment not yet verified.** The compose
-  config for the public HTTPS route is committed, but the app container
-  still has to be recreated and the Cloudflare DNS record created. See
-  the 2026-11-03 log entry for the exact steps.
+**Known open items / ideas.** None open. The app is live at
+https://fiori-plus.true-bar.si (verified 2026-11-03).
 
 ---
 
 ## Log (newest first)
 
-### 2026-11-03 — Public HTTPS route via Traefik (handoff: deploy pending)
+### 2026-11-03 — Public HTTPS route via Traefik (deployed and verified)
+
+**Outcome.** Live at https://fiori-plus.true-bar.si. Cloudflare A record
+(DNS only) created, app container recreated, Let's Encrypt certificate
+issued (valid until 2027-02-01, auto-renewed by Traefik), HTTP → 308 →
+HTTPS → 303 `/login`. Host port 8000 is loopback-only. The original
+handoff text below is kept for the reasoning.
 
 **Problem.** The app had been reachable only on `http://88.200.23.57:8000`
 from inside the 88.200.23.0/24 subnet. The host firewall (`PERIMETER`
@@ -84,7 +87,7 @@ CrowdSec, and the firewall rules live outside the repo.
   troubleshooting commands. Fixed the backup volume name
   (`fiori-plus_db_data`).
 
-**Open threads / next steps — in this order.**
+**Steps that were followed (all done 2026-11-03).**
 1. Cloudflare, zone `true-bar.si`: add `A` record `fiori-plus` →
    `88.200.23.57`, proxy status **DNS only**. Existing `*.true-bar.si`
    hosts on this server are all DNS-only.
